@@ -1,0 +1,9 @@
+# core
+numpy
+ase
+matplotlib
+
+# needed for `mflow.py calc` (not for `mflow.py plot`)
+mace-torch
+# torch is pulled in by mace-torch; install the build matching your CUDA version
+# e.g. pip install torch --index-url https://download.pytorch.org/whl/cpu

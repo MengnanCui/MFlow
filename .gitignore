@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.model
+py.log
+*.png
+*_metrics.json
+*_mace.xyz
