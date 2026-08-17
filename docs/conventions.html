@@ -1,0 +1,539 @@
+<title>MFlow Conventions</title>
+<style>
+  :root {
+    --ground:#f6f8fa; --surface:#ffffff; --surface-2:#eef2f6; --code-bg:#f2f5f8;
+    --ink:#0f171e; --ink-2:#3d4b58; --ink-3:#6b7a88;
+    --line:#dae1e9; --line-soft:#e8edf2;
+    --accent:#2470a0; --accent-ink:#1b5a83; --accent-soft:#e3eef6;
+    --warm:#ca3e47; --warm-ink:#a92f38; --warm-soft:#fbecee;
+    --amber:#b3720c; --amber-soft:#fdf1de;
+    --shadow:0 1px 2px rgba(15,23,30,.05), 0 8px 24px -16px rgba(15,23,30,.25);
+    --mono: ui-monospace,"SFMono-Regular","JetBrains Mono","Menlo","Consolas",monospace;
+    --sans: system-ui,-apple-system,"Segoe UI","Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#0d1319; --surface:#141c24; --surface-2:#1a242e; --code-bg:#101820;
+      --ink:#e6edf3; --ink-2:#a9b8c6; --ink-3:#78899a;
+      --line:#253340; --line-soft:#1d2832;
+      --accent:#58a6d8; --accent-ink:#8cc6ec; --accent-soft:#16293a;
+      --warm:#e4737a; --warm-ink:#f09aa0; --warm-soft:#2e1c1f;
+      --amber:#e5b062; --amber-soft:#2d2417;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#0d1319; --surface:#141c24; --surface-2:#1a242e; --code-bg:#101820;
+    --ink:#e6edf3; --ink-2:#a9b8c6; --ink-3:#78899a;
+    --line:#253340; --line-soft:#1d2832;
+    --accent:#58a6d8; --accent-ink:#8cc6ec; --accent-soft:#16293a;
+    --warm:#e4737a; --warm-ink:#f09aa0; --warm-soft:#2e1c1f;
+    --amber:#e5b062; --amber-soft:#2d2417;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--ground); color:var(--ink);
+    font-family:var(--sans); font-size:16px; line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { max-width:920px; margin:0 auto; padding:0 24px 96px; }
+
+  header { padding:52px 0 32px; }
+  .eyebrow {
+    font-family:var(--mono); font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--accent); margin:0 0 12px;
+  }
+  h1 {
+    font-family:var(--mono); font-size:clamp(30px,5.5vw,44px); font-weight:700;
+    letter-spacing:-.03em; line-height:1.1; margin:0 0 14px; text-wrap:balance;
+  }
+  .lede { font-size:17.5px; color:var(--ink-2); max-width:64ch; margin:0; }
+
+  /* table of contents */
+  nav {
+    margin-top:26px; padding:16px 18px; background:var(--surface);
+    border:1px solid var(--line); border-radius:10px; box-shadow:var(--shadow);
+  }
+  nav ol { margin:0; padding-left:20px; columns:2; column-gap:32px; }
+  nav li { margin:2px 0; font-size:14.5px; break-inside:avoid; }
+  nav a { color:var(--ink-2); text-decoration:none; }
+  nav a:hover { color:var(--accent-ink); text-decoration:underline; }
+
+  section { padding:34px 0; border-top:1px solid var(--line-soft); }
+  h2 {
+    font-family:var(--mono); font-size:16px; font-weight:700; letter-spacing:-.01em;
+    margin:0 0 6px; color:var(--ink); scroll-margin-top:20px;
+  }
+  h2 .num { color:var(--accent); margin-right:10px; font-weight:600; }
+  .sub { font-size:14px; color:var(--ink-3); margin:0 0 20px; font-family:var(--mono); }
+  h3 { font-size:16px; font-weight:650; margin:24px 0 8px; letter-spacing:-.01em; }
+  p { margin:0 0 14px; color:var(--ink-2); max-width:70ch; }
+  p:last-child { margin-bottom:0; }
+  strong { color:var(--ink); font-weight:650; }
+  a { color:var(--accent-ink); text-underline-offset:2px; }
+  ul { margin:0 0 14px; padding-left:20px; color:var(--ink-2); }
+  li { margin-bottom:6px; }
+  li::marker { color:var(--accent); }
+
+  code {
+    font-family:var(--mono); font-size:.87em; background:var(--surface-2);
+    border:1px solid var(--line-soft); border-radius:4px; padding:1px 5px;
+  }
+  pre {
+    margin:0 0 14px; background:var(--code-bg); border:1px solid var(--line);
+    border-radius:10px; padding:14px 16px; overflow-x:auto;
+    font-family:var(--mono); font-size:13px; line-height:1.6; color:var(--ink);
+  }
+  pre code { background:none; border:none; padding:0; font-size:13px; }
+
+  /* the maths display */
+  .eq {
+    background:var(--accent-soft); border:1px solid var(--line);
+    border-left:3px solid var(--accent); border-radius:8px;
+    padding:14px 18px; margin:0 0 16px;
+    font-family:var(--mono); font-size:14.5px; color:var(--ink);
+    overflow-x:auto;
+  }
+  .eq .note { display:block; margin-top:8px; font-size:12.5px; color:var(--ink-3); }
+
+  /* callouts: convention vs risk vs decision */
+  .call {
+    border:1px solid var(--line); border-radius:10px; padding:14px 16px;
+    margin:0 0 14px; background:var(--surface); box-shadow:var(--shadow);
+  }
+  .call .tag {
+    display:inline-block; font-family:var(--mono); font-size:11px;
+    letter-spacing:.1em; text-transform:uppercase; padding:2px 8px;
+    border-radius:999px; margin-bottom:8px;
+  }
+  .call p { margin:0; font-size:14.5px; }
+  .call.risk { border-left:3px solid var(--warm); }
+  .call.risk .tag { background:var(--warm-soft); color:var(--warm-ink); }
+  .call.conv { border-left:3px solid var(--accent); }
+  .call.conv .tag { background:var(--accent-soft); color:var(--accent-ink); }
+  .call.deci { border-left:3px solid var(--amber); }
+  .call.deci .tag { background:var(--amber-soft); color:var(--amber); }
+
+  .tablewrap {
+    overflow-x:auto; border:1px solid var(--line); border-radius:10px;
+    background:var(--surface); box-shadow:var(--shadow); margin-bottom:14px;
+  }
+  table { border-collapse:collapse; width:100%; font-size:14px; font-variant-numeric:tabular-nums; }
+  th, td { text-align:left; padding:10px 14px; border-bottom:1px solid var(--line-soft); vertical-align:top; }
+  th {
+    font-family:var(--mono); font-size:11.5px; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--ink-3); font-weight:600; background:var(--surface-2); white-space:nowrap;
+  }
+  tbody tr:last-child td { border-bottom:none; }
+  td.mono { font-family:var(--mono); font-size:13px; }
+  td.nowrap { white-space:nowrap; }
+  .sev {
+    display:inline-block; font-family:var(--mono); font-size:11px; font-weight:700;
+    padding:2px 8px; border-radius:999px; white-space:nowrap;
+  }
+  .sev.high { background:var(--warm-soft); color:var(--warm-ink); }
+  .sev.mid  { background:var(--amber-soft); color:var(--amber); }
+  .sev.low  { background:var(--accent-soft); color:var(--accent-ink); }
+
+  footer {
+    padding:28px 0 0; border-top:1px solid var(--line-soft);
+    font-family:var(--mono); font-size:12.5px; color:var(--ink-3);
+  }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  @media (max-width:600px) { nav ol { columns:1; } }
+</style>
+
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">mflow v0.3.0 · 执行细节</p>
+  <h1>约定与风险</h1>
+  <p class="lede">
+    这份文档记录 <code>mflow.py</code> 在计算过程中<strong>替你做了什么决定</strong>：
+    为了跑通而设的默认、领域里约定俗成但代码里没写死的假设、以及每条决定对应的风险。
+    数字对不对，取决于这些约定是否成立。
+  </p>
+  <nav>
+    <ol>
+      <li><a href="#e0">能量对齐（E0）</a></li>
+      <li><a href="#forces">力：不需要对齐</a></li>
+      <li><a href="#units">单位与符号</a></li>
+      <li><a href="#labels">标签与自动探测</a></li>
+      <li><a href="#numeric">数值与可复现性</a></li>
+      <li><a href="#metrics">统计量的定义</a></li>
+      <li><a href="#plot">绘图的取舍</a></li>
+      <li><a href="#decisions">为跑通而做的决定</a></li>
+      <li><a href="#risks">风险清单</a></li>
+    </ol>
+  </nav>
+</header>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="e0">
+  <h2><span class="num">01</span>能量对齐（E0）</h2>
+  <p class="sub">compare() · align_e0() · -e0 fit | mean | none | file.json</p>
+
+  <p>
+    <strong>问题：</strong>DFT 的总能量和 MACE 的总能量不在同一个零点上。赝势、基组、
+    模型训练时用的 atomic reference 都不同，两者相差的是<strong>每种元素一个常数</strong>，
+    不是一个全局常数。所以直接比总能量（或总能量除以原子数）没有物理意义。
+  </p>
+
+  <div class="eq">
+    E<sub>pred</sub>(i) − E<sub>ref</sub>(i) = Σ<sub>j</sub> n<sub>ij</sub> · δ<sub>j</sub> + ε<sub>i</sub>
+    <span class="note">
+      i = 结构，j = 元素，n<sub>ij</sub> = 结构 i 里元素 j 的原子数，
+      δ<sub>j</sub> = 两种方法对元素 j 的参考能之差（eV/该元素原子），ε = 真正的误差
+    </span>
+  </div>
+
+  <p>
+    <strong>做法：</strong>不需要你提供单原子能量。代码把上式当成线性方程组，
+    用 <code>np.linalg.lstsq</code> 从<strong>数据集本身</strong>最小二乘解出 δ，
+    再从预测能量里减掉 <code>C @ δ</code>，然后才比较。这就是默认的 <code>-e0 fit</code>。
+  </p>
+
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      报告里 <code>energy (E0 aligned)</code> 是扣掉 δ 之后的误差 —— 看这一行；
+      <code>energy (raw)</code> 是不做任何对齐的原始差值，只用来看偏移有多大。
+      两行的 R² 不同：对齐改变了数值，不只是平移。
+    </p>
+  </div>
+
+  <h3>四种模式</h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>-e0</th><th>含义</th><th>什么时候用</th></tr></thead>
+      <tbody>
+        <tr><td class="mono nowrap"><strong>fit</strong></td><td>每个元素各解一个 δ（默认）</td><td>常规。数据集有多种化学配比时必须用这个</td></tr>
+        <tr><td class="mono nowrap">mean</td><td>所有元素共用一个 δ</td><td>单一体系（如纯 Cu），和 v0.2 的老行为一致</td></tr>
+        <tr><td class="mono nowrap">none</td><td>δ = 0，直接比原始数</td><td>你确信两边零点相同，或想看偏移的绝对大小</td></tr>
+        <tr><td class="mono nowrap">file.json</td><td>δ 由你给定<br><code>{"Si": 0.35, "O": -0.20}</code></td><td>你已经知道两边的 atomic reference，不想让代码去拟合</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>验证</h3>
+  <p>
+    构造了一组 Si/O 比例随机变化的结构，人为注入 δ<sub>Si</sub> = +0.35、δ<sub>O</sub> = −0.20 eV/atom
+    和 10 meV/atom 的随机噪声，再让代码去拟合：
+  </p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>-e0</th><th>拟合出的 δ</th><th>对齐后 RMSE</th><th>结论</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">fit</td><td class="mono">Si +0.3542 · O −0.2076</td><td class="mono"><strong>8.70</strong> meV/atom</td><td>回到注入的噪声量级 ✓</td></tr>
+        <tr><td class="mono">mean</td><td class="mono">两者都 +0.0918</td><td class="mono">115.67 meV/atom</td><td>成分项没扣掉，虚高 13 倍</td></tr>
+        <tr><td class="mono">none</td><td class="mono">0</td><td class="mono">147.65 meV/atom</td><td>基本在量 δ 本身</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="call risk">
+    <span class="tag">risk · 高</span>
+    <p>
+      <strong>δ 是从被评估的这批数据里拟合出来的</strong>，属于自洽对齐。如果模型对某个元素
+      有真实的系统性偏差，这个偏差会被 δ 吸收掉，报告出来的 RMSE 偏乐观。
+      结构数少于元素数 3 倍时会打 warning。要判断影响，拿 <code>-e0 none</code> 对比着看，
+      或者用一批独立数据拟合出 δ 之后用 <code>-e0 file.json</code> 固定住。
+    </p>
+  </div>
+
+  <div class="call risk">
+    <span class="tag">risk · 中</span>
+    <p>
+      <strong>δ 未必唯一。</strong>如果数据集里某几种元素的配比始终固定（比如全是 H₂O，
+      H:O 永远 2:1），只有 2δ<sub>H</sub>+δ<sub>O</sub> 的组合可解，单个 δ 解不出来。
+      这时 lstsq 给的是最小范数解，<strong>总修正量 C·δ 仍然是唯一且正确的</strong>，
+      但打印出来的每元素数值只是众多等价解中的一个 —— 别拿它当物理量引用。代码会 warning：
+      <code>only 2 of 3 element shifts are identifiable</code>。
+    </p>
+  </div>
+
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      能量一律换算成 <strong>每原子</strong>（eV/atom → 报告用 meV/atom）之后再统计，
+      这样大小不同的结构可以放在一起比。注意除的是<strong>总原子数</strong>，
+      不区分元素；结构之间不做加权（每个结构在 RMSE 里权重相同，不按原子数加权）。
+    </p>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="forces">
+  <h2><span class="num">02</span>力：不需要对齐</h2>
+  <p class="sub">compare() · errors["forces"]</p>
+  <p>
+    E0 是常数，对坐标求导为零，所以<strong>力不受 atomic reference 影响</strong>，
+    直接逐分量比较即可。力的 RMSE 是绝对量，不存在能量那种"对齐后才有意义"的问题 ——
+    判断模型好坏时，力的误差比能量误差更可信。
+  </p>
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      统计的是<strong>所有原子的所有笛卡尔分量</strong>（N = 3 × 总原子数），
+      不是每个原子的模长 |F|。这是 MACE / GAP 社区通行做法，和 mace 训练日志里的
+      force RMSE 可比。图上 <code>max |F|</code> 那个量则是每个结构里最大的模长，
+      只用于看数据集里有没有异常受力的结构。
+    </p>
+  </div>
+  <div class="call risk">
+    <span class="tag">risk · 高</span>
+    <p>
+      <strong>符号约定。</strong>MACE 输出的是力 F = −∂E/∂R。如果你的参考数据里存的是
+      <strong>梯度</strong>（很多量化程序的默认输出）而不是力，parity 图会呈现一条斜率 −1 的直线：
+      R² 很高但 RMSE 巨大。看到这种图先检查符号，不是模型的问题。
+    </p>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="units">
+  <h2><span class="num">03</span>单位与符号</h2>
+  <p class="sub">全流程不做任何单位换算</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>量</th><th>假定输入单位</th><th>报告单位</th></tr></thead>
+      <tbody>
+        <tr><td>能量</td><td class="mono">eV</td><td class="mono">meV/atom</td></tr>
+        <tr><td>力</td><td class="mono">eV/Å</td><td class="mono">meV/Å</td></tr>
+        <tr><td>坐标 / 晶胞</td><td class="mono">Å</td><td class="mono">Å</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="call risk">
+    <span class="tag">risk · 高</span>
+    <p>
+      代码<strong>不检查也不换算单位</strong>。参考标签若是 Hartree、kcal/mol 或 eV/Bohr，
+      所有数字会静默出错 —— 唯一的征兆是 δ 或 RMSE 大得离谱。ASE 的 extxyz 生态默认
+      eV / Å，输入前请自行确认。
+    </p>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="labels">
+  <h2><span class="num">04</span>标签与自动探测</h2>
+  <p class="sub">read_dataset() · find_ref() · fix_prefix()</p>
+  <ul>
+    <li>能量写进 <code>atoms.info["&lt;prefix&gt;energy"]</code>（每结构一个标量），
+        力写进 <code>atoms.arrays["&lt;prefix&gt;forces"]</code>（N×3）。这是 extxyz 的惯例。</li>
+    <li><code>-prefix mpa0</code> 会自动补成 <code>mpa0_</code>；写 <code>-prefix _</code>
+        表示不加前缀，即裸的 <code>energy</code> / <code>forces</code>。</li>
+    <li>读文件时，ASE 会把裸的 <code>energy</code>/<code>forces</code> 塞进
+        <code>SinglePointCalculator</code> 而不是 info/arrays。代码会把它们<strong>搬回</strong>
+        info/arrays，这样无前缀的标签也能当参考用；同时 <code>atoms.calc</code> 被清空，
+        避免写出去的时候 ASE 又自作主张加一份。</li>
+  </ul>
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      不指定 <code>-ref</code> 时，按这个顺序在<strong>第一个结构</strong>上探测参考标签：
+      <code>(无前缀) → REF_ → ref_ → dft_ → DFT_ → pbe_ → scan_</code>，
+      先找同时有 energy 和 forces 的，再退而求其次找只有 energy 的。
+    </p>
+  </div>
+  <div class="call risk">
+    <span class="tag">risk · 中</span>
+    <p>
+      探测只看<strong>第一帧</strong>。如果数据集前后标签不一致（前面有 dft_forces、后面没有），
+      会在读取时报 KeyError 而不是跳过。另外若一个文件里同时存在多套参考标签，
+      探测到的可能不是你想要的那套 —— 输出的参数表里会写明实际用的是哪个，扫一眼确认。
+    </p>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="numeric">
+  <h2><span class="num">05</span>数值与可复现性</h2>
+  <p class="sub">load_model() · evaluate()</p>
+  <ul>
+    <li><strong>batch size 不改变结果</strong>，只影响速度和显存；批内结构相互独立。
+        不同 batch 下末位浮点差异属正常。</li>
+    <li><code>-dtype float64</code> 是默认，和 mace 官方 eval 一致；<code>float32</code> 更快，
+        能量差异通常在 0.1 meV/atom 量级。模型权重会显式 cast 到所选精度，
+        避免 float32 权重遇上 float64 输入的报错。</li>
+    <li>模型里的 <code>r_max</code> 决定近邻表，代码原样使用，<strong>不做覆盖</strong>。</li>
+    <li>送进 MACE 的是<strong>只含几何信息的副本</strong>（原子序数 / 坐标 / 晶胞 / pbc），
+        原始 info/arrays 一律不传，防止 mace 的 key 解析和参考标签打架。</li>
+  </ul>
+  <div class="call risk">
+    <span class="tag">risk · 中</span>
+    <p>
+      <strong>周期性边界靠输入文件里的 pbc 和 Lattice。</strong>孤立分子若被误标成周期性
+      且晶胞太小，MACE 会算进镜像相互作用，能量偏低且没有任何提示。
+      数据集摘要那一行会打印 <code>N periodic</code>，和你的预期对一下。
+    </p>
+  </div>
+  <div class="call risk">
+    <span class="tag">risk · 低</span>
+    <p>
+      多 head 模型不指定 <code>-head</code> 时用模型的默认 head，不同 head 的能量零点
+      可以差很多。用 fine-tune 出来的多 head 模型时请显式指定。
+    </p>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="metrics">
+  <h2><span class="num">06</span>统计量的定义</h2>
+  <p class="sub">stats()</p>
+  <pre><code>d      = (pred - ref) * 1000        # meV/atom 或 meV/Å
+MAE    = mean(|d|)
+RMSE   = sqrt(mean(d²))
+max|Δ| = max(|d|)
+R²     = corrcoef(ref, pred)² </code></pre>
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      R² 用的是 <strong>Pearson 相关系数的平方</strong>，不是回归里的 1 − SS<sub>res</sub>/SS<sub>tot</sub>。
+      前者对平移和缩放都不敏感 —— 也就是说 <strong>R² 高不代表数值对</strong>，
+      它只说明趋势一致。判断准确性看 RMSE，判断趋势看 R²。
+    </p>
+  </div>
+  <p>
+    参考值全部相同（<code>ptp(ref) == 0</code>）或只有一个结构时 R² 返回 <code>nan</code>，不报错。
+  </p>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="plot">
+  <h2><span class="num">07</span>绘图的取舍</h2>
+  <p class="sub">make_plot() · _parity() · _hist()</p>
+  <ul>
+    <li>能量 parity 画的是 <strong>E0 对齐之后</strong>的每原子能量，所以两轴可以直接比，
+        标题会写明用的哪种对齐模式。</li>
+    <li>点数 &gt; <strong>20,000</strong> 自动从散点切成 hexbin（对数颜色标尺），否则密集数据会糊成一团。</li>
+    <li>点数 &gt; <strong>500,000</strong> 随机降采样，固定种子 <code>8465</code>，
+        并在日志里写明"降了多少 / 原本多少" —— 不做静默截断。</li>
+    <li>误差直方图固定 50 个 bin，零点画虚线。</li>
+    <li>y = x 参考线按两组数据的整体范围画，不是按各自的轴。</li>
+  </ul>
+  <div class="call risk">
+    <span class="tag">risk · 低</span>
+    <p>
+      降采样只影响<strong>图</strong>，表格里的 RMSE / MAE / R² 永远用全部数据算。
+    </p>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="decisions">
+  <h2><span class="num">08</span>为跑通而做的决定</h2>
+  <p class="sub">这些是工程取舍，不是物理</p>
+
+  <div class="call deci">
+    <span class="tag">decision</span>
+    <p>
+      <strong>批量失败自动退回逐结构。</strong>批量前向依赖 mace 的内部 API
+      （<code>config_from_atoms</code>、<code>AtomicData.from_config</code>），这些签名跨版本变过。
+      一旦抛异常，代码会打 warning 然后改用稳定的 <code>MACECalculator</code> 逐个算，
+      结果相同、速度慢很多。<strong>看到这条 warning 说明版本有漂移，值得去查一下。</strong>
+    </p>
+  </div>
+  <div class="call deci">
+    <span class="tag">decision</span>
+    <p>
+      <strong>模型路径不存在就立刻退出</strong>，而不是当成基础模型名去联网下载 ——
+      否则打错一个字符会变成默默下载几百 MB 的另一个模型。判据：字符串里有 <code>/</code>
+      或以 <code>.model</code> 结尾就当作路径。
+    </p>
+  </div>
+  <div class="call deci">
+    <span class="tag">decision</span>
+    <p>
+      <strong>整个数据集一次性读进内存</strong>（<code>ase.io.read(index=":")</code>）。
+      十万结构以上的数据集请用 <code>-index :10000</code> 分块跑，否则可能吃光内存。
+    </p>
+  </div>
+  <div class="call deci">
+    <span class="tag">decision</span>
+    <p>
+      <strong>输出文件保留原有的全部标签</strong>，只新增 <code>&lt;prefix&gt;energy</code> /
+      <code>&lt;prefix&gt;forces</code>。同名前缀会被覆盖 —— 重复跑同一个前缀时留意。
+    </p>
+  </div>
+  <div class="call deci">
+    <span class="tag">decision</span>
+    <p>
+      <strong>日志每次覆盖不追加。</strong><code>py.log</code> 对应"最近一次运行"。
+      要留档就用 <code>-log run1.log</code> 显式指定文件名。
+    </p>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="risks">
+  <h2><span class="num">09</span>风险清单</h2>
+  <p class="sub">出问题时按这张表查</p>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>风险</th><th>严重度</th><th>症状</th><th>怎么查 / 怎么办</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>E0 拟合吸收了真实误差</td><td><span class="sev high">高</span></td>
+          <td>RMSE 好得不真实</td>
+          <td>和 <code>-e0 none</code> 对比；用独立数据定 δ 后 <code>-e0 file.json</code> 固定</td>
+        </tr>
+        <tr>
+          <td>参考数据存的是梯度不是力</td><td><span class="sev high">高</span></td>
+          <td>力 parity 呈斜率 −1，R² 高但 RMSE 巨大</td>
+          <td>翻转符号后重跑</td>
+        </tr>
+        <tr>
+          <td>单位不是 eV / eV·Å⁻¹</td><td><span class="sev high">高</span></td>
+          <td>δ 或 RMSE 差好几个数量级</td>
+          <td>输入前自行换算，代码不检查</td>
+        </tr>
+        <tr>
+          <td>δ 不可分辨（配比固定）</td><td><span class="sev mid">中</span></td>
+          <td>warning: <code>only k of n identifiable</code></td>
+          <td>总修正仍正确，但别引用单个 δ 值</td>
+        </tr>
+        <tr>
+          <td>自动探测到了错的参考标签</td><td><span class="sev mid">中</span></td>
+          <td>误差异常大</td>
+          <td>看参数表里的 reference 行，用 <code>-ref</code> 显式指定</td>
+        </tr>
+        <tr>
+          <td>孤立分子被标成周期性</td><td><span class="sev mid">中</span></td>
+          <td>能量系统性偏低，无提示</td>
+          <td>核对数据集摘要里的 <code>N periodic</code></td>
+        </tr>
+        <tr>
+          <td>元素超出模型覆盖范围</td><td><span class="sev mid">中</span></td>
+          <td>mace 报错，或外插出离谱的数</td>
+          <td>核对模型的元素列表；MACE-MP 覆盖 89 种元素</td>
+        </tr>
+        <tr>
+          <td>多 head 模型用了默认 head</td><td><span class="sev low">低</span></td>
+          <td>能量零点整体偏移</td>
+          <td>显式 <code>-head</code></td>
+        </tr>
+        <tr>
+          <td>退回逐结构模式</td><td><span class="sev low">低</span></td>
+          <td>warning: <code>batched run failed</code>，速度骤降</td>
+          <td>结果不受影响；查 mace 版本兼容性</td>
+        </tr>
+        <tr>
+          <td>float32 精度</td><td><span class="sev low">低</span></td>
+          <td>能量差 ~0.1 meV/atom</td>
+          <td>要精确用默认 float64</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  MFlow v0.3.0 · docs/conventions.html · MengnanCui/MFlow
+</footer>
+
+</div>

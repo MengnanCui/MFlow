@@ -1,6 +1,8 @@
 # MFlow
 
-单文件机器学习势工具箱（v0.2.0，`mflow.py`，约 600 行）。当前功能：静态 MACE 计算能量和力。
+单文件机器学习势工具箱（v0.3.0，`mflow.py`，约 650 行）。当前功能：静态 MACE 计算能量和力。
+
+计算过程中的**约定、默认和风险点**写在 [`docs/conventions.html`](docs/conventions.html) —— 尤其是能量对齐那一节，看数字之前先看它。
 
 ```bash
 pip install mace-torch ase numpy matplotlib rich
@@ -25,6 +27,7 @@ python mflow.py plot -in data_mace.xyz -ref dft_         # 只重画，不重算
 | `-batch` | `32` | batch size |
 | `-prefix` | `mpa0_` | 输出标签前缀 → `mpa0_energy` / `mpa0_forces` |
 | `-ref` | 自动探测 | 参考标签前缀（`dft_` / `REF_` / 无前缀 `energy`） |
+| `-e0` | `fit` | 能量对齐：`fit` 逐元素最小二乘 ／ `mean` 单一常数 ／ `none` ／ json 文件 |
 | `-out` `-outdir` `-log` | `<stem>_mace.xyz` `.` `py.log` | 输出位置 |
 | `-index` | `:` | ASE 切片，如 `:100` |
 | `-device` `-dtype` | `auto` `float64` | cuda/cpu/mps；float64/float32 |
@@ -43,20 +46,32 @@ python mflow.py plot -in data_mace.xyz -ref dft_         # 只重画，不重算
 终端和日志同一份内容：`rich` 负责上色、表格、进度条；日志文件去掉颜色。
 
 ```
-12:00:07 MFlow 0.2.0 · calc ───────────────────────────────────────
-     input  small.xyz                      index  :
-     model  small                           kind  foundation
-batch size  4                             device  cpu
+12:00:07 MFlow 0.3.0 · calc ───────────────────────────────────────
+     input  data.xyz                       index  :
+     model  mace-mpa-0-medium.model         kind  local file
+batch size  32                            device  cuda
 ...
 error  mpa0_ vs dft_
-                       MAE       RMSE     max|Δ|        R²      N        unit
-energy               97.24     108.60     189.39    0.9861     12    meV/atom
-energy (shifted)     41.72      52.32     107.65    0.9861     12    meV/atom
-forces              971.37    1368.22    6783.39    0.0000    228       meV/Å
-constant offset +95.2 meV/atom — the shifted row is the one that describes the shape
+                          MAE       RMSE     max|Δ|        R²      N        unit
+energy (E0 aligned)      7.30       8.70      18.69    0.9982     40    meV/atom
+energy (raw)           116.03     147.65     354.00    0.8951     40    meV/atom
+forces                  15.39      19.32      73.22    0.9975  1,302       meV/Å
+E0 alignment (fit), eV per atom of element: O -0.2076 · Si +0.3542
 ```
 
-**energy vs energy (shifted)**：两种方法的原子参考能不同，总能量差一个常数；`shifted` 是两边各自减均值后的误差，描述"形状"是否一致，通常看这一行。
+## 能量对齐（E0）
+
+DFT 和 MACE 的总能量不在同一个零点上，差的是**每种元素一个常数**：
+
+```
+E_pred(i) - E_ref(i) = Σ_j n_ij · δ_j + ε_i
+```
+
+不需要提供单原子能量 —— 代码用 `np.linalg.lstsq` 从数据集本身解出 δ，扣掉之后再算误差，
+这就是默认的 `-e0 fit`。报告里 **`energy (E0 aligned)` 是要看的那一行**，`energy (raw)` 只用来看偏移有多大。
+力不受 E0 影响，无需对齐。
+
+⚠️ δ 是从被评估的数据里拟合的，会吸收模型真实的系统性偏差 —— 详见 `docs/conventions.html`。
 
 ## 说明
 

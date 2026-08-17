@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MFlow v0.2.0 — single-file MACE toolkit.
+MFlow v0.3.0 — single-file MACE toolkit.
 
     calc : evaluate an xyz dataset with MACE -> energies & forces
     plot : re-analyse / re-plot an already evaluated file
@@ -33,7 +33,7 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, TimeElapsedCo
 from rich.table import Table
 from rich.theme import Theme
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # --- plot style (publication) -------------------------------------------------
 COLORS = ["#2470a0", "#ca3e47", "#f29c2b", "#1f640a", "#2ca02c", "#9467bd",
@@ -123,6 +123,11 @@ def table(title: str, columns: list, rows: list, styles: list | None = None) -> 
 
 def elapsed(seconds: float) -> str:
     return str(timedelta(seconds=round(seconds)))
+
+
+def num(value: float, digits: int = 2) -> str:
+    """Fixed point while it stays readable, scientific once it would blow up the column."""
+    return f"{value:.{digits}f}" if abs(value) < 1e5 else f"{value:.3g}"
 
 
 # ============================================================================ #
@@ -316,29 +321,70 @@ def stats(pred: np.ndarray, ref: np.ndarray, scale: float = 1.0) -> dict:
             "max": float(np.abs(d).max()), "R2": r2, "N": int(d.size)}
 
 
-def compute_errors(frames: list, pred: str, ref: str) -> dict:
-    """Energies per atom (meV/atom, raw and mean-shifted) + force components (meV/Å)."""
+def composition(frames: list) -> tuple[np.ndarray, list]:
+    """C[i, j] = how many atoms of element j structure i contains."""
+    zs = sorted({int(z) for a in frames for z in a.numbers})
+    return np.array([[int(np.count_nonzero(a.numbers == z)) for z in zs] for a in frames], float), zs
+
+
+def align_e0(frames: list, diff: np.ndarray, mode) -> tuple[np.ndarray, np.ndarray, list]:
+    """
+    No two codes share an atomic reference, so total energies are only comparable up to
+    one constant per element:  E_pred - E_ref = Σ_j n_j δ_j.  This returns δ (eV/atom of
+    that element), fitted from the dataset itself — no isolated-atom energies needed.
+
+        fit  : least squares over the composition matrix (default; needs independent compositions)
+        mean : a single δ shared by all elements — what a plain mean shift does
+        none : δ = 0, compare the raw numbers
+        dict : δ supplied by the user, {"Si": -0.12, ...} or {"14": -0.12, ...}
+    """
+    from ase.data import chemical_symbols
+    C, zs = composition(frames)
+    if mode == "none":
+        return np.zeros(len(zs)), C, zs
+    if isinstance(mode, dict):
+        delta = np.array([float(mode.get(chemical_symbols[z], mode.get(str(z), 0.0))) for z in zs])
+    elif mode == "fit":
+        delta, _, rank, _ = np.linalg.lstsq(C, diff, rcond=None)  # minimum-norm solution
+        if rank < len(zs):
+            LOG(f"[warn]E0 fit: only {rank} of {len(zs)} element shifts are identifiable — the total "
+                f"correction is still exact, but the per-element numbers below are one of many solutions[/warn]")
+        if len(frames) < 3 * len(zs):
+            LOG(f"[warn]E0 fit on {len(frames)} structures for {len(zs)} elements — the fit can absorb "
+                f"real error; check against '-e0 none'[/warn]")
+    else:
+        delta = np.full(len(zs), float((diff / C.sum(1)).mean()))
+    return delta, C, zs
+
+
+def compare(frames: list, pred: str, ref: str, e0="fit") -> tuple[dict, dict]:
+    """Errors (meV/atom, meV/Å) after E0 alignment + the arrays the figure needs."""
+    from ase.data import chemical_symbols
     n = np.array([len(a) for a in frames], dtype=float)
-    e_pred, e_ref = energies(frames, pred) / n, energies(frames, ref) / n
-    out = {"energy": stats(e_pred, e_ref, 1000),
-           "energy_shifted": stats(e_pred - e_pred.mean(), e_ref - e_ref.mean(), 1000),
-           "offset_meV_per_atom": float((e_pred - e_ref).mean() * 1000)}
+    et_pred, et_ref = energies(frames, pred), energies(frames, ref)  # total energies, eV
+    delta, C, zs = align_e0(frames, et_pred - et_ref, e0)
+
+    series = {"e_pred": (et_pred - C @ delta) / n, "e_ref": et_ref / n}
+    errors = {"energy": stats(series["e_pred"], series["e_ref"], 1000),
+              "energy_raw": stats(et_pred / n, et_ref / n, 1000),
+              "e0_mode": e0 if isinstance(e0, str) else "user",
+              "e0_shift_eV": {chemical_symbols[z]: float(d) for z, d in zip(zs, delta)}}
     if keys(ref)[1] in frames[0].arrays:
-        out["forces"] = stats(forces(frames, pred), forces(frames, ref), 1000)
-    return out
+        series["f_pred"], series["f_ref"] = forces(frames, pred), forces(frames, ref)
+        errors["forces"] = stats(series["f_pred"], series["f_ref"], 1000)  # forces need no alignment
+    return errors, series
 
 
 def report_errors(errors: dict, pred: str, ref: str):
-    rows = [(name, f"{s['MAE']:.2f}", f"{s['RMSE']:.2f}", f"{s['max']:.2f}", f"{s['R2']:.4f}",
-             f"{s['N']:,}", unit)
-            for name, s, unit in [("energy", errors["energy"], "meV/atom"),
-                                  ("energy (shifted)", errors["energy_shifted"], "meV/atom")]
+    rows = [(name, num(s["MAE"]), num(s["RMSE"]), num(s["max"]), f"{s['R2']:.4f}", f"{s['N']:,}", unit)
+            for name, s, unit in [("energy (E0 aligned)", errors["energy"], "meV/atom"),
+                                  ("energy (raw)", errors["energy_raw"], "meV/atom")]
             + ([("forces", errors["forces"], "meV/Å")] if "forces" in errors else [])]
     LOG(table(f"error  {pred or 'pred'} vs {ref or 'ref'}",
               ["", "MAE", "RMSE", "max|Δ|", "R²", "N", "unit"], rows,
               styles=["key", None, "hi", None, None, "dim", "dim"]))
-    LOG(f"[dim]constant offset {errors['offset_meV_per_atom']:+.1f} meV/atom "
-        f"— the shifted row is the one that describes the shape[/dim]")
+    shifts = " · ".join(f"{el} {d:+.4f}" for el, d in errors["e0_shift_eV"].items())
+    LOG(f"[dim]E0 alignment ({errors['e0_mode']}), eV per atom of element: {shifts}[/dim]")
 
 
 def report_prediction(frames: list, prefix: str) -> dict:
@@ -347,7 +393,7 @@ def report_prediction(frames: list, prefix: str) -> dict:
     fmax = np.array([np.linalg.norm(a.arrays[keys(prefix)[1]], axis=1).max() for a in frames])
     rows = [("energy", "eV/atom", e_pa), ("max |F|", "eV/Å", fmax)]
     LOG(table(f"prediction  {prefix or ''}", ["", "unit", "min", "max", "mean", "std"],
-              [(name, unit, f"{v.min():.4f}", f"{v.max():.4f}", f"{v.mean():.4f}", f"{v.std():.4f}")
+              [(name, unit, num(v.min(), 4), num(v.max(), 4), num(v.mean(), 4), num(v.std(), 4))
                for name, unit, v in rows], styles=["key", "dim"]))
     return {name: {"min": float(v.min()), "max": float(v.max()), "mean": float(v.mean()),
                    "std": float(v.std()), "unit": unit} for name, unit, v in rows}
@@ -391,28 +437,27 @@ def _hist(ax, values, xlabel, color, zero_line=True):
     ax.set(xlabel=xlabel, ylabel="Counts")
 
 
-def make_plot(frames: list, pred: str, ref: str | None, errors: dict | None, outfile: str):
+def make_plot(frames: list, pred: str, ref: str | None, errors: dict | None,
+              series: dict | None, outfile: str):
     """With a reference: 2x2 parity + error histograms. Without: prediction distributions."""
-    n = np.array([len(a) for a in frames], dtype=float)
-    e_pred = energies(frames, pred) / n
     tag = lambda p: (p or "pred").rstrip("_").upper()
 
     if ref is None or errors is None:
+        n = np.array([len(a) for a in frames], dtype=float)
         fmax = np.array([np.linalg.norm(a.arrays[keys(pred)[1]], axis=1).max() for a in frames])
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-        _hist(axes[0], e_pred, "Energy (eV/atom)", COLORS[0], zero_line=False)
+        _hist(axes[0], energies(frames, pred) / n, "Energy (eV/atom)", COLORS[0], zero_line=False)
         _hist(axes[1], fmax, r"max |F| (eV/$\mathrm{\AA}$)", COLORS[1], zero_line=False)
     else:
-        e_ref = energies(frames, ref) / n
+        # energies here are already E0-aligned, so the axes are directly comparable
+        e_pred, e_ref, es = series["e_pred"], series["e_ref"], errors["energy"]
         fig, axes = plt.subplots(2, 2, figsize=(11, 8.5))
-        es = errors["energy_shifted"]
-        _parity(axes[0, 0], e_ref - e_ref.mean(), e_pred - e_pred.mean(),
-                f"{tag(ref)} rel. energy (eV/atom)", f"{tag(pred)} rel. energy (eV/atom)", "Energy",
+        _parity(axes[0, 0], e_ref, e_pred, f"{tag(ref)} energy (eV/atom)",
+                f"{tag(pred)} energy (eV/atom)", f"Energy · E0 {errors['e0_mode']}",
                 f"RMSE = {es['RMSE']:.2f} meV/atom\nR$^2$ = {es['R2']:.4f}\nN = {es['N']:,}")
-        _hist(axes[1, 0], (e_pred - e_ref - (e_pred - e_ref).mean()) * 1000,
-              "Energy error (meV/atom)", COLORS[0])
+        _hist(axes[1, 0], (e_pred - e_ref) * 1000, "Energy error (meV/atom)", COLORS[0])
         if "forces" in errors:
-            f_pred, f_ref, fs = forces(frames, pred), forces(frames, ref), errors["forces"]
+            f_pred, f_ref, fs = series["f_pred"], series["f_ref"], errors["forces"]
             _parity(axes[0, 1], f_ref, f_pred, rf"{tag(ref)} force comp. (eV/$\mathrm{{\AA}}$)",
                     rf"{tag(pred)} force comp. (eV/$\mathrm{{\AA}}$)", "Forces",
                     f"RMSE = {fs['RMSE']:.1f} meV/$\\mathrm{{\\AA}}$\nR$^2$ = {fs['R2']:.4f}\nN = {fs['N']:,}")
@@ -458,6 +503,11 @@ def pick_device(device: str) -> str:
         return "cpu"
 
 
+def parse_e0(value: str):
+    """'fit' | 'mean' | 'none' as is; anything else is a json file of per-element shifts."""
+    return value if value in ("fit", "mean", "none") else json.loads(Path(value).read_text(encoding="utf-8"))
+
+
 def resolve_ref(frames: list, requested: str | None, pred: str) -> str | None:
     if requested is None:
         ref = find_ref(frames, exclude=pred)
@@ -483,7 +533,7 @@ def cmd_calc(args) -> int:
             "batch size": args.batch_size, "device": device,
             "dtype": args.dtype, "head": args.head or "—",
             "labels": " / ".join(keys(prefix)), "reference": args.ref_prefix or "auto",
-            "output": outfile, "log": args.log})
+            "E0 align": args.e0, "output": outfile, "log": args.log})
     LOG(f"[dim]{versions()}[/dim]")
 
     LOG.rule("dataset")
@@ -500,11 +550,11 @@ def cmd_calc(args) -> int:
     LOG(f"xyz [key]{outfile}[/key] · {len(frames)} structures")
 
     prediction = report_prediction(frames, prefix)
-    errors = compute_errors(frames, prefix, ref) if ref else None
+    errors, series = compare(frames, prefix, ref, parse_e0(args.e0)) if ref else (None, None)
     if errors:
         report_errors(errors, prefix, ref)
     if not args.no_plot:
-        make_plot(frames, prefix, ref, errors, str(Path(args.outdir) / f"{stem}_summary.png"))
+        make_plot(frames, prefix, ref, errors, series, str(Path(args.outdir) / f"{stem}_summary.png"))
 
     metrics = {"mflow": __version__, "time": datetime.now().isoformat(timespec="seconds"),
                "input": os.path.abspath(args.input), "output": os.path.abspath(outfile),
@@ -527,11 +577,11 @@ def cmd_plot(args) -> int:
 
     ref = resolve_ref(frames, args.ref_prefix, pred)
     Path(args.outdir).mkdir(parents=True, exist_ok=True)
-    errors = compute_errors(frames, pred, ref) if ref else None
+    errors, series = compare(frames, pred, ref, parse_e0(args.e0)) if ref else (None, None)
     if errors:
         report_errors(errors, pred, ref)
         (Path(args.outdir) / f"{stem}_metrics.json").write_text(json.dumps(errors, indent=2), encoding="utf-8")
-    make_plot(frames, pred, ref, errors, str(Path(args.outdir) / f"{stem}_summary.png"))
+    make_plot(frames, pred, ref, errors, series, str(Path(args.outdir) / f"{stem}_summary.png"))
     return 0
 
 
@@ -552,6 +602,10 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("-index", default=":", help="ase slice, e.g. ':100' [:]")
     common.add_argument("-ref", dest="ref_prefix", default=None, metavar="PREFIX",
                         help="reference label prefix, e.g. dft_ [auto-detect]")
+    common.add_argument("-e0", default="fit", metavar="MODE",
+                        help="how to align the atomic reference before comparing energies: "
+                             "fit (per-element least squares) | mean (one shared shift) | "
+                             "none | a json file {'Si': -0.12, ...} [fit]")
     common.add_argument("-outdir", default=".", help="output directory [.]")
     common.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
 
