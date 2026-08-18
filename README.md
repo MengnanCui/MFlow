@@ -1,6 +1,6 @@
 # MFlow
 
-单文件机器学习势工具箱（v0.4.0，`mflow.py`，约 800 行）。当前功能：静态 MACE 计算能量和力，按标签分类误差。
+单文件机器学习势工具箱（v0.5.0，`mflow.py`，约 1150 行）。功能：静态 MACE 计算、结构弛豫、按标签分类误差。
 
 计算过程中的**约定、默认和风险点**写在 [`docs/conventions.html`](docs/conventions.html) —— 尤其是能量对齐那一节，看数字之前先看它。
 
@@ -17,6 +17,11 @@ python mflow.py calc -in data.xyz -model ./my.model -prefix mace_
 python mflow.py calc -in data.xyz -ref dft_              # 和 dft_energy/dft_forces 比较
 python mflow.py calc -in data.xyz -group config_type     # 按已有标签把误差拆开
 python mflow.py plot -in data_mace.xyz -ref dft_         # 只重画，不重算
+
+python mflow.py relax -in data.xyz                       # 弛豫：位置+晶胞，fmax 0.05
+python mflow.py relax -in data.xyz -cell none -fmax 0.02 # 固定晶胞，更严
+python mflow.py relax -in data.xyz -nproc 3 -dtype float32   # 3 个 worker 共享一张卡
+python mflow.py relax -in data.xyz -resume               # 接着上次中断的继续
 ```
 
 参数一律多字母，不用单字母，避免撞车：
@@ -34,7 +39,20 @@ python mflow.py plot -in data_mace.xyz -ref dft_         # 只重画，不重算
 | `-index` | `:` | ASE 切片，如 `:100` |
 | `-device` `-dtype` | `auto` `float64` | cuda/cpu/mps；float64/float32 |
 | `-head` | 无 | 多 head 模型指定 head |
+| `-overwrite` | 关 | 前缀已存在时强制覆盖（默认自动顺延成 `mpa0_c1_`） |
 | `-noplot` | 关 | 跳过画图 |
+
+`relax` 专有：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `-fmax` | `0.05` | 收敛判据，eV/Å（ASE 定义：原子受力模长的最大值） |
+| `-steps` | `500` | 每个结构最大优化步数 |
+| `-opt` | `fire` | ASE 优化器：`fire` / `fire2` / `lbfgs` / `bfgs` |
+| `-cell` | `full` | `full` 用 `FrechetCellFilter` 放开晶胞；`none` 只优化位置。非周期结构自动退回位置优化 |
+| `-nproc` | `auto` | worker 进程数，每个自带一份模型。auto：GPU → 1，CPU → 核数/4 |
+| `-traj` | 无 | 把所有中间帧写进一个 xyz |
+| `-resume` | 关 | 从 `<stem>_relax.part.xyz` 接着跑 |
 
 ## 输出
 
@@ -98,13 +116,56 @@ KEY 可以是任意 `info` 键（`config_type` / `step` / `temperature_K`…）�
 每次跑完还会把 `<prefix>dE`（meV/atom，有符号）和 `<prefix>dF`（该结构力 RMSE，meV/Å）写进输出 xyz，
 方便你自己排序、筛选，或下一轮直接 `-group mpa0_dE`。
 
+## 结构弛豫（relax）
+
+优化器**全部用 ASE 现成的**，MFlow 只负责喂结构、收结果、记账。
+
+```
+relax  mpa0_
+                   unit        min     median        max       mean
+steps                      21.0000    28.5000    35.0000    27.6667
+Erelax          eV/atom    -0.3434    -0.0701    -0.0351    -0.1138
+final fmax         eV/Å     0.0108     0.0337     0.0503     0.0330
+displacement          Å     0.0523     0.1583     0.3439     0.1761
+12/12 converged · 0 hit the step limit · 0 failed · 0:00:42 · 0.29 struct/s · 1 worker(s)
+```
+
+写进输出 xyz 的标签（`<p>` = 前缀）：
+
+| key | 含义 |
+|-----|------|
+| **`<p>steps`** | **优化步数** |
+| `<p>converged` | 是否收敛（未收敛的结构照样写出，用这个筛） |
+| `<p>energy` `<p>forces` | 弛豫后的能量与力 |
+| `<p>energy0` `<p>Erelax` | 弛豫前能量；(E_末−E_初)/N，eV/atom |
+| `<p>fmax` `<p>dmax` `<p>dvol` | 最终最大受力；原子最大位移 Å；体积变化 % |
+| `<p>walltime` `<p>index` | 该结构耗时；在输入文件里的原始位置 |
+
+### 并行与内存
+
+ASE 优化器逐结构串行，并行只能来自进程级：`multiprocessing` 的 **spawn**（fork 继承 CUDA context 会崩），
+每个 worker 只加载一次模型。进子进程的只有几何，父进程的 `Atoms` 从不进子进程，**标签因此不受并行影响**。
+实测 `-nproc 3` 与 `-nproc 1` 能量差 2×10⁻¹⁴ eV，步数完全一致，输出仍按输入顺序。
+
+- 每个 worker ≈ 一份模型 + 一个 CUDA context（约 0.5 GB）+ 单结构的图 → **worker 数是唯一的显存旋钮**。
+- `-dtype float32` 减半，弛豫场景性价比最高。
+- 结果流式落盘到 `.part`，内存与结构数无关，被 kill 也不丢；`-resume` 接着跑，完成后自动删除。
+- 结束时报告实测峰值 RSS 和 GPU 峰值显存，`-nproc` 据此调。
+
+⚠️ **单张 GPU 上 ASE 路线跑不满** —— 一个小结构的 forward 填不满 GPU。能做的只有 `-nproc 2~4` 共享一张卡 +
+`float32`。真正的 GPU 批量弛豫需要把优化器本身向量化（torch-sim 那类），本工具不做。
+
+⚠️ `-cell full` 时 ASE 用 filter 的力（含应力）判收敛，写出的 `<p>fmax` 是原始原子力，两者可能差一点点 ——
+**按 `<p>converged` 筛，不要按 `<p>fmax < 0.05` 筛**。
+
 ## 标签保留
 
 **输入 xyz 里已有的标签全部保留**：`config_type`、`step`、自定义 per-atom 数组、
 挂在 calculator 上的 `energy`/`forces`/`stress`，都原样写出。MACE 拿到的是只含几何的副本，碰不到你的标签。
 只新增 `<prefix>energy`、`<prefix>forces`、`<prefix>dE`、`<prefix>dF` 四个 key。
 
-⚠️ 用同一个 `-prefix` 重跑会覆盖上一轮的这四个 key；比较两个模型请用不同前缀。
+**同名前缀不会被覆盖，而是自动顺延**：若 `mpa0_energy` 已存在，本次写成 `mpa0_c1_*`，
+再来一次是 `mpa0_c2_*`，旧值原封不动。要强制沿用原前缀加 `-overwrite`。
 
 ## 说明
 

@@ -148,7 +148,7 @@
 <div class="wrap">
 
 <header>
-  <p class="eyebrow">mflow v0.4.0 · 执行细节</p>
+  <p class="eyebrow">mflow v0.5.0 · 执行细节</p>
   <h1>约定与风险</h1>
   <p class="lede">
     这份文档记录 <code>mflow.py</code> 在计算过程中<strong>替你做了什么决定</strong>：
@@ -163,6 +163,7 @@
       <li><a href="#labels">标签与自动探测</a></li>
       <li><a href="#preserve">已有标签会被保留吗</a></li>
       <li><a href="#group">分类（-group）</a></li>
+      <li><a href="#relax">结构弛豫（relax）</a></li>
       <li><a href="#numeric">数值与可复现性</a></li>
       <li><a href="#metrics">统计量的定义</a></li>
       <li><a href="#plot">绘图的取舍</a></li>
@@ -395,12 +396,13 @@
       原子数撞车，强制归入 info。
     </p>
   </div>
-  <div class="call risk">
-    <span class="tag">risk · 中</span>
+  <div class="call conv">
+    <span class="tag">convention</span>
     <p>
-      <strong>同名前缀会被覆盖。</strong>用同一个 <code>-prefix</code> 重跑，旧的
-      <code>&lt;prefix&gt;energy</code> / <code>dE</code> / <code>dF</code> 会被新结果盖掉。
-      要并排比较两个模型，就用不同前缀（<code>-prefix mpa0_</code> 和 <code>-prefix omat_</code>）。
+      <strong>同名前缀不会被覆盖，而是自动顺延。</strong>若 <code>&lt;prefix&gt;energy</code>
+      已经在文件里，本次结果写成 <code>mpa0_c1_*</code>，再来一次是 <code>mpa0_c2_*</code>，
+      旧值原封不动。这样同一个文件里可以叠放多轮结果做对比。要强制沿用原前缀（覆盖旧值）加
+      <code>-overwrite</code>。
     </p>
   </div>
 </section>
@@ -454,8 +456,121 @@
 </section>
 
 <!-- ─────────────────────────────────────────────────────────────── -->
+<section id="relax">
+  <h2><span class="num">07</span>结构弛豫（relax）</h2>
+  <p class="sub">cmd_relax() · _relax_one() · ASE 优化器 + 多进程</p>
+
+  <p>
+    优化算法<strong>全部用 ASE 现成的</strong>（<code>ase.optimize</code> 的 FIRE / FIRE2 /
+    LBFGS / BFGS），放开晶胞用 <code>ase.filters.FrechetCellFilter</code>。
+    MFlow 只负责喂结构、收结果、记账，优化本身一行都不自己写。
+  </p>
+
+  <h3>收敛判据</h3>
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      <code>-fmax</code> 是 ASE 的定义：<strong>所有原子受力模长的最大值</strong>（不是分量最大值，
+      也不是 RMS）。默认 0.05 eV/Å，<code>-steps</code> 默认 500。
+    </p>
+  </div>
+  <div class="call risk">
+    <span class="tag">risk · 低</span>
+    <p>
+      <code>-cell full</code> 时 ASE 判断收敛用的是 <strong>filter 的力</strong>——原子力在形变基下的
+      变换值再加上应力分量——而写进文件的 <code>&lt;p&gt;fmax</code> 是<strong>原始原子力</strong>的最大模长。
+      两者不完全相等，实测可能出现 <code>converged=T</code> 但 <code>fmax=0.0503</code> 略超阈值的情况。
+      按 <code>&lt;p&gt;converged</code> 筛选，不要按 <code>&lt;p&gt;fmax &lt; 0.05</code> 筛。
+      <code>-cell none</code> 时两者完全一致。
+    </p>
+  </div>
+
+  <h3>晶胞</h3>
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      <strong>默认 <code>-cell full</code>，同时优化原子位置和晶胞。</strong>
+      非周期结构（<code>pbc=False</code>）或零体积晶胞上应变没有定义，这类结构<strong>自动退回只优化位置</strong>，
+      不报错；它们也不会写 <code>&lt;p&gt;dvol</code>。<code>-cell none</code> 则全部固定晶胞。
+    </p>
+  </div>
+
+  <h3>写进文件的标签</h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th class="mono">key</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td class="mono"><b>&lt;p&gt;steps</b></td><td>优化步数，<code>opt.get_number_of_steps()</code></td></tr>
+        <tr><td class="mono">&lt;p&gt;converged</td><td>是否达到 fmax（未收敛的结构<strong>照样写出</strong>，用这个筛）</td></tr>
+        <tr><td class="mono">&lt;p&gt;energy / &lt;p&gt;forces</td><td>弛豫后的能量与力</td></tr>
+        <tr><td class="mono">&lt;p&gt;energy0</td><td>弛豫前的单点能量，eV</td></tr>
+        <tr><td class="mono">&lt;p&gt;Erelax</td><td>(E_final − E_initial)/N，eV/atom，负值表示下山</td></tr>
+        <tr><td class="mono">&lt;p&gt;fmax / &lt;p&gt;dmax</td><td>最终最大受力；原子最大位移 Å</td></tr>
+        <tr><td class="mono">&lt;p&gt;dvol</td><td>体积变化 %（仅放开晶胞且周期性时）</td></tr>
+        <tr><td class="mono">&lt;p&gt;walltime / &lt;p&gt;index</td><td>该结构耗时 s；在输入文件里的原始位置</td></tr>
+        <tr><td class="mono">&lt;p&gt;error</td><td>仅失败时写入，值为异常信息；该结构几何保持原样</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note" style="margin-bottom:14px">
+    <code>&lt;p&gt;Erelax</code> 不叫 <code>&lt;p&gt;dE</code> ——
+    后者在 <code>calc</code> 里已经表示"相对参考数据的能量误差"，两者含义完全不同。
+  </p>
+  <div class="call deci">
+    <span class="tag">decision</span>
+    <p>
+      弛豫改变了几何，文件里原有的 <code>dft_energy</code> / <code>dft_forces</code> 仍然对应
+      <strong>初始几何</strong>。它们是 DFT 的量、与 MACE 无关，因此一律不动、不改名；
+      MACE 的结果永远带自己的前缀，不存在覆盖或混淆。
+    </p>
+  </div>
+
+  <h3>并行</h3>
+  <div class="call deci">
+    <span class="tag">decision</span>
+    <p>
+      ASE 优化器是<strong>逐结构串行</strong>的，一次 forward 只算一个结构。并行只能来自进程级：
+      <code>multiprocessing</code> 的 <strong>spawn</strong> 上下文（fork 继承 CUDA context 会直接崩），
+      每个 worker 在 <code>initializer</code> 里<strong>只加载一次模型</strong>——按结构加载的话，
+      1000 个结构就是 1000 次加载。
+    </p>
+  </div>
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      进子进程的只有几何（原子序数 / 坐标 / 晶胞 / pbc）+ 索引，回来的是坐标、能量、力和计数。
+      <strong>父进程持有的 <code>Atoms</code> 从不进子进程</strong>，所以原有标签天然不受并行影响。
+      结果用 <code>imap_unordered</code> 收（先算完先落盘），最终文件仍按<strong>输入顺序</strong>写出。
+      实测 <code>-nproc 3</code> 与 <code>-nproc 1</code> 的能量差 2×10⁻¹⁴ eV，步数完全一致。
+    </p>
+  </div>
+  <div class="call risk">
+    <span class="tag">risk · 中</span>
+    <p>
+      <strong>单张 GPU 上 ASE 路线跑不满。</strong>一个小结构的 forward 填不满 GPU，瓶颈在 kernel
+      launch 和近邻表重建。能做的只有：<code>-nproc 2~4</code> 让多个进程共享一张卡、
+      <code>-dtype float32</code>、以及别设过大的 <code>-steps</code>。真正的 GPU 批量弛豫需要把优化器
+      本身向量化（例如 torch-sim 的 batched FIRE + InFlightAutoBatcher），
+      <strong>那是另一条路线，本工具没有实现</strong>。
+    </p>
+  </div>
+
+  <h3>内存</h3>
+  <ul>
+    <li>每个 worker ≈ 一份模型权重 + 一个 CUDA context（约 0.5 GB）+ 单结构的图。
+        <strong>worker 数是唯一的显存旋钮。</strong></li>
+    <li><code>-dtype float32</code> 权重和激活都减半；弛豫对精度不如对步数敏感，这是性价比最高的一项。</li>
+    <li>结果<strong>流式落盘</strong>到 <code>&lt;stem&gt;_relax.part.xyz</code>，内存占用与结构数无关，
+        中途被 kill 也不丢已完成的工作；<code>-resume</code> 从这里接着跑，全部完成后自动删除。</li>
+    <li>默认不留轨迹；<code>-traj FILE</code> 才写，所有中间帧进同一个文件，用
+        <code>&lt;p&gt;opt_index</code> / <code>&lt;p&gt;opt_step</code> 标记。</li>
+    <li>结束时报告<strong>实测</strong>峰值 RSS 和 GPU 峰值显存，<code>-nproc</code> 据此调，不用猜。</li>
+  </ul>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
 <section id="numeric">
-  <h2><span class="num">07</span>数值与可复现性</h2>
+  <h2><span class="num">08</span>数值与可复现性</h2>
   <p class="sub">load_model() · evaluate()</p>
   <ul>
     <li><strong>batch size 不改变结果</strong>，只影响速度和显存；批内结构相互独立。
@@ -486,7 +601,7 @@
 
 <!-- ─────────────────────────────────────────────────────────────── -->
 <section id="metrics">
-  <h2><span class="num">08</span>统计量的定义</h2>
+  <h2><span class="num">09</span>统计量的定义</h2>
   <p class="sub">stats()</p>
   <pre><code>d      = (pred - ref) * 1000        # meV/atom 或 meV/Å
 MAE    = mean(|d|)
@@ -508,7 +623,7 @@ R²     = corrcoef(ref, pred)² </code></pre>
 
 <!-- ─────────────────────────────────────────────────────────────── -->
 <section id="plot">
-  <h2><span class="num">09</span>绘图的取舍</h2>
+  <h2><span class="num">10</span>绘图的取舍</h2>
   <p class="sub">make_plot() · _parity() · _hist()</p>
   <ul>
     <li>能量 parity 画的是 <strong>E0 对齐之后</strong>的每原子能量，所以两轴可以直接比，
@@ -529,7 +644,7 @@ R²     = corrcoef(ref, pred)² </code></pre>
 
 <!-- ─────────────────────────────────────────────────────────────── -->
 <section id="decisions">
-  <h2><span class="num">10</span>为跑通而做的决定</h2>
+  <h2><span class="num">11</span>为跑通而做的决定</h2>
   <p class="sub">这些是工程取舍，不是物理</p>
 
   <div class="call deci">
@@ -574,7 +689,7 @@ R²     = corrcoef(ref, pred)² </code></pre>
 
 <!-- ─────────────────────────────────────────────────────────────── -->
 <section id="risks">
-  <h2><span class="num">11</span>风险清单</h2>
+  <h2><span class="num">12</span>风险清单</h2>
   <p class="sub">出问题时按这张表查</p>
   <div class="tablewrap">
     <table>
@@ -618,9 +733,19 @@ R²     = corrcoef(ref, pred)² </code></pre>
           <td>核对模型的元素列表；MACE-MP 覆盖 89 种元素</td>
         </tr>
         <tr>
-          <td>同名前缀重跑被覆盖</td><td><span class="sev mid">中</span></td>
-          <td>旧的 &lt;prefix&gt;energy / dE / dF 被新结果盖掉</td>
-          <td>比较两个模型时用不同 <code>-prefix</code></td>
+          <td>未收敛的结构照样写进输出</td><td><span class="sev mid">中</span></td>
+          <td>看起来是弛豫后的结构，其实卡在步数上限</td>
+          <td>用 <code>&lt;p&gt;converged</code> 过滤，别只看有没有能量</td>
+        </tr>
+        <tr>
+          <td>-cell full 时 fmax 略超阈值</td><td><span class="sev low">低</span></td>
+          <td>converged=T 但 &lt;p&gt;fmax 稍大于 -fmax</td>
+          <td>判据用的是 filter 的力；按 converged 筛</td>
+        </tr>
+        <tr>
+          <td>单 GPU 上 relax 跑不满</td><td><span class="sev mid">中</span></td>
+          <td>GPU 利用率低，吞吐远低于预期</td>
+          <td><code>-nproc 2~4</code> + <code>-dtype float32</code>；批量弛豫需另一条路线</td>
         </tr>
         <tr>
           <td>-group 的键在部分结构上缺失</td><td><span class="sev low">低</span></td>
@@ -648,7 +773,7 @@ R²     = corrcoef(ref, pred)² </code></pre>
 </section>
 
 <footer>
-  MFlow v0.4.0 · docs/conventions.html · MengnanCui/MFlow
+  MFlow v0.5.0 · docs/conventions.html · MengnanCui/MFlow
 </footer>
 
 </div>
