@@ -203,6 +203,15 @@ ASE 优化器逐结构串行，并行只能来自进程级：`multiprocessing` �
 - 画图点数 > 2 万自动 hexbin，> 50 万随机降采样并在日志里说明。
 - 数据处理约定参考 [ptbplus](https://gitlab.com/mncui/ptbplus)。
 
+## tools/
+
+体系专属的小工具放在 [`tools/`](tools/)，共用 `mflow.py` 的读写、日志和绘图风格。
+目前有 `izo_formation.py`（In–Zn–O 形成能 vs In 比例），用法见 [tools/README.md](tools/README.md)。
+
+```bash
+python tools/izo_formation.py -in izo_mace.xyz -eZnO zno_mace.xyz -eIn2O3 in2o3_mace.xyz
+```
+
 ## Roadmap
 
 数据集工具（merge/split/delta/filter）· 训练与迁移学习封装 · 收敛曲线 · MD / 结构优化
