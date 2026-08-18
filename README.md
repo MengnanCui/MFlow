@@ -1,6 +1,6 @@
 # MFlow
 
-单文件机器学习势工具箱（v0.5.0，`mflow.py`，约 1150 行）。功能：静态 MACE 计算、结构弛豫、按标签分类误差。
+单文件机器学习势工具箱（v0.6.0，`mflow.py`，约 1360 行）。功能：静态 MACE 计算、结构弛豫、按标签分类误差，运行时资源监控。
 
 计算过程中的**约定、默认和风险点**写在 [`docs/conventions.html`](docs/conventions.html) —— 尤其是能量对齐那一节，看数字之前先看它。
 
@@ -140,6 +140,35 @@ displacement          Å     0.0523     0.1583     0.3439     0.1761
 | `<p>energy0` `<p>Erelax` | 弛豫前能量；(E_末−E_初)/N，eV/atom |
 | `<p>fmax` `<p>dmax` `<p>dvol` | 最终最大受力；原子最大位移 Å；体积变化 % |
 | `<p>walltime` `<p>index` | 该结构耗时；在输入文件里的原始位置 |
+
+### 运行时资源监控
+
+进度条右侧实时显示整卡/整机用量，**跑的时候就能判断该开几个 worker**：
+
+```
+relaxing ━━━━━━━━━━╺━━━━  45/120 structures  0:01:23  eta 0:02:10 │ GPU  87% 6.2/24GB · CPU 340% · RAM 12/64GB
+```
+
+配色即结论：**GPU 利用率 ≥70% 绿 / 30–70% 黄 / <30% 红**（红 = GPU 闲着，该加 worker）；
+显存和内存 ≥90% 红（该减 worker）；CPU 超过核数 95% 变黄（线程超订）。
+终端窄时从右往左自动省略，优先保住 GPU。
+
+结束时终端和 `py.log` 各一行汇总，同样的数字进 `metrics.json` 的 `resources` 段：
+
+```
+resources · GPU util mean 64% peak 92% · GPU mem peak 6.2/24.0 GB · CPU mean 340% of 1600% · RAM peak 12.1/64.0 GB
+```
+
+采样后端按可用性降级，缺哪个就少显示哪个，**任何后端出错都只是关掉该项，不影响计算**：
+
+| 指标 | 首选 | 退路 | 再退 |
+|------|------|------|------|
+| GPU | `pynvml`（`pip install nvidia-ml-py`） | `nvidia-smi`（GPU 节点必有） | 无 |
+| CPU / 内存 | `psutil` | `/proc/stat`、`/proc/meminfo` | `os.getloadavg()` |
+
+采样 1 Hz，实测开关监控的耗时差异在运行噪声内。要完全关掉：`MFLOW_NO_MONITOR=1`。
+
+⚠️ 这些数字是**整卡/整机**口径（含同卡上别人的任务）—— 调 `-nproc` 要看的正是这个，但它不等于"MFlow 自己用了多少"。
 
 ### 并行与内存
 

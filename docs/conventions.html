@@ -148,7 +148,7 @@
 <div class="wrap">
 
 <header>
-  <p class="eyebrow">mflow v0.5.0 · 执行细节</p>
+  <p class="eyebrow">mflow v0.6.0 · 执行细节</p>
   <h1>约定与风险</h1>
   <p class="lede">
     这份文档记录 <code>mflow.py</code> 在计算过程中<strong>替你做了什么决定</strong>：
@@ -555,6 +555,60 @@
     </p>
   </div>
 
+  <h3>资源监控</h3>
+  <p>
+    进度条右侧实时显示<strong>整卡 / 整机</strong>用量，跑的时候就能判断该开几个 worker。
+    采样 1 Hz（用 rich 自带的 <code>ProgressColumn.max_refresh</code> 节流，不自己写定时器），
+    实测开关监控的耗时差异在运行噪声内。
+  </p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>指标</th><th>首选</th><th>退路</th><th>再退</th></tr></thead>
+      <tbody>
+        <tr><td>GPU 利用率 / 显存</td><td class="mono">pynvml</td><td class="mono">nvidia-smi</td><td class="mono">torch.cuda.mem_get_info</td></tr>
+        <tr><td>CPU</td><td class="mono">psutil</td><td class="mono">/proc/stat</td><td class="mono">os.getloadavg</td></tr>
+        <tr><td>内存</td><td class="mono">psutil</td><td class="mono">/proc/meminfo</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="call deci">
+    <span class="tag">decision</span>
+    <p>
+      <strong>父进程绝不调用 <code>torch.cuda.mem_get_info()</code>。</strong>
+      <code>-nproc N&gt;1</code> 时算力都在子进程里、父进程<strong>没有 CUDA context</strong>，
+      调它会凭空建一个 context，白白吃掉约 300 MB 显存 —— 监控本身把显存吃了，荒谬。
+      <code>pynvml</code> 和 <code>nvidia-smi</code> 查的是驱动，不需要 context，因此永远优先。
+    </p>
+  </div>
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      显存和内存一律按 <strong>GiB</strong> 报（1024³）。<code>nvidia-smi</code> 给的是 MiB、
+      <code>pynvml</code> 给的是字节，两边都换算到 GiB 才对得上 —— 否则两个后端会差 4.9%。
+      一张"24 GB 卡"因此显示成 24.0。
+    </p>
+  </div>
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      <strong>配色即结论。</strong>GPU 利用率 ≥70% 绿、30–70% 黄、&lt;30% <span style="color:var(--warm-ink)">红</span>
+      —— 闲着的 GPU 是要发现的问题，不是中性信息；显存/内存 ≥90% 红（该减 worker）；
+      CPU 超过核数 95% 变黄（线程超订）。终端窄时从右往左自动省略，优先保住 GPU。
+    </p>
+  </div>
+  <div class="call risk">
+    <span class="tag">risk · 中</span>
+    <p>
+      <strong>这些数字是整卡 / 整机口径</strong>，包含同一张卡上别人的任务和本机其他进程。
+      调 <code>-nproc</code> 要看的正是这个，但<strong>不要当成"MFlow 自己用了多少"</strong>；
+      要后者请看结束时那行 peak RSS，以及 worker 侧上报的 <code>torch.cuda.max_memory_allocated()</code>。
+    </p>
+  </div>
+  <p class="note" style="margin-bottom:18px">
+    任何后端抛异常，该项<strong>就地关掉</strong>、其余照常，绝不让监控搞挂计算；
+    要整体关掉设环境变量 <code>MFLOW_NO_MONITOR=1</code>。
+  </p>
+
   <h3>内存</h3>
   <ul>
     <li>每个 worker ≈ 一份模型权重 + 一个 CUDA context（约 0.5 GB）+ 单结构的图。
@@ -743,6 +797,11 @@ R²     = corrcoef(ref, pred)² </code></pre>
           <td>判据用的是 filter 的力；按 converged 筛</td>
         </tr>
         <tr>
+          <td>监控数字是整卡口径</td><td><span class="sev mid">中</span></td>
+          <td>显存/利用率包含别人的任务</td>
+          <td>调 -nproc 看这个没错；要本程序占用看 peak RSS 那行</td>
+        </tr>
+        <tr>
           <td>单 GPU 上 relax 跑不满</td><td><span class="sev mid">中</span></td>
           <td>GPU 利用率低，吞吐远低于预期</td>
           <td><code>-nproc 2~4</code> + <code>-dtype float32</code>；批量弛豫需另一条路线</td>
@@ -773,7 +832,7 @@ R²     = corrcoef(ref, pred)² </code></pre>
 </section>
 
 <footer>
-  MFlow v0.5.0 · docs/conventions.html · MengnanCui/MFlow
+  MFlow v0.6.0 · docs/conventions.html · MengnanCui/MFlow
 </footer>
 
 </div>

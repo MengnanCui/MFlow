@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MFlow v0.5.0 — single-file MACE toolkit.
+MFlow v0.6.0 — single-file MACE toolkit.
 
     calc  : evaluate an xyz dataset with MACE -> energies & forces
     relax : optimise every structure with an ASE optimiser -> geometries, energies, steps
@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -37,11 +39,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from rich.console import Console
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, TimeElapsedColumn, TimeRemainingColumn
+from rich.progress import (BarColumn, MofNCompleteColumn, Progress, ProgressColumn,
+                          TimeElapsedColumn, TimeRemainingColumn)
 from rich.table import Table
+from rich.text import Text
 from rich.theme import Theme
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 # --- plot style (publication) -------------------------------------------------
 COLORS = ["#2470a0", "#ca3e47", "#f29c2b", "#1f640a", "#2ca02c", "#9467bd",
@@ -62,6 +66,7 @@ MODEL_ALIASES = {"mp": "medium", "mp0": "medium", "mpa": "medium-mpa-0", "mpa0":
                  "omat": "medium-omat-0", "omat0": "medium-omat-0"}
 REF_CANDIDATES = ["", "REF_", "ref_", "dft_", "DFT_", "pbe_", "scan_"]
 HEXBIN_ABOVE, PLOT_MAX_POINTS = 20_000, 500_000
+GIB = 1024 ** 3   # memory is reported in GiB, the unit nvidia-smi and free agree on
 # shapes that could be mistaken for a per-atom array in a small cell
 AMBIGUOUS = {"stress", "dipole", "magmom"}
 
@@ -144,6 +149,185 @@ def elapsed(seconds: float) -> str:
 def num(value: float, digits: int = 2) -> str:
     """Fixed point while it stays readable, scientific once it would blow up the column."""
     return f"{value:.{digits}f}" if abs(value) < 1e5 else f"{value:.3g}"
+
+
+# ============================================================================ #
+#  resource monitor — what the run is actually using, live on the progress bar
+# ============================================================================ #
+
+class Monitor:
+    """
+    GPU / CPU / RAM sampling with a fallback chain, so a missing package never
+    costs more than the reading itself. Numbers are whole-device: with several
+    workers on one card that is exactly what you need to size -nproc, but it is
+    not "how much MFlow uses".
+    """
+
+    def __init__(self):
+        self.gpu, self.cpu, self.ram = None, None, None   # backend names, None = unavailable
+        self.history = {"gpu_util": [], "gpu_mem": [], "cpu": [], "ram": []}
+        self.gpu_total = self.ram_total = 0.0             # GB
+        self._nvml = self._psutil = None
+        self._cpu_prev = None
+        if not os.environ.get("MFLOW_NO_MONITOR"):        # escape hatch if a backend misbehaves
+            self._setup()
+
+    # -- backends ----------------------------------------------------------- #
+    def _setup(self):
+        try:                                              # nvml needs no CUDA context
+            import pynvml
+            pynvml.nvmlInit()
+            self._nvml = (pynvml, pynvml.nvmlDeviceGetHandleByIndex(0))
+            self.gpu = "pynvml"
+            self.gpu_total = pynvml.nvmlDeviceGetMemoryInfo(self._nvml[1]).total / GIB
+        except Exception:
+            if shutil.which("nvidia-smi"):
+                self.gpu = "nvidia-smi"
+        try:
+            import psutil
+            self._psutil = psutil
+            psutil.cpu_percent(interval=None)             # prime the delta
+            self.cpu = self.ram = "psutil"
+            self.ram_total = psutil.virtual_memory().total / GIB
+        except Exception:
+            if Path("/proc/stat").exists():
+                self.cpu, self._cpu_prev = "/proc/stat", self._proc_cpu_raw()
+            if Path("/proc/meminfo").exists():
+                self.ram = "/proc/meminfo"
+
+    @staticmethod
+    def _proc_cpu_raw():
+        fields = [float(x) for x in Path("/proc/stat").read_text().split("\n")[0].split()[1:]]
+        return sum(fields), sum(fields) - fields[3] - (fields[4] if len(fields) > 4 else 0.0)
+
+    def _read_gpu(self) -> tuple:
+        if self.gpu == "pynvml":
+            pynvml, handle = self._nvml
+            memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            return float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu), memory.used / GIB
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5).stdout
+        util, used, total = (float(x) for x in out.splitlines()[0].split(","))   # MiB
+        self.gpu_total = total / 1024
+        return util, used / 1024
+
+    def _read_cpu(self) -> float:
+        if self.cpu == "psutil":
+            return self._psutil.cpu_percent(interval=None) * (os.cpu_count() or 1) / 100
+        total, busy = self._proc_cpu_raw()
+        prev_total, prev_busy = self._cpu_prev
+        self._cpu_prev = (total, busy)
+        span = total - prev_total
+        return (busy - prev_busy) / span * (os.cpu_count() or 1) if span > 0 else 0.0
+
+    def _read_ram(self) -> float:
+        if self.ram == "psutil":
+            memory = self._psutil.virtual_memory()
+            return (memory.total - memory.available) / GIB
+        info = {}
+        for line in Path("/proc/meminfo").read_text().splitlines()[:5]:
+            key, _, value = line.partition(":")
+            info[key] = float(value.split()[0]) / 1024 ** 2                # kB -> GiB
+        self.ram_total = info.get("MemTotal", 0.0)
+        return info.get("MemTotal", 0.0) - info.get("MemAvailable", 0.0)
+
+    # -- sampling ----------------------------------------------------------- #
+    def sample(self) -> dict:
+        """One reading. Any backend that throws is switched off for the rest of the run."""
+        now = {}
+        for name, reader, keys_ in (("gpu", self._read_gpu, ("gpu_util", "gpu_mem")),
+                                    ("cpu", self._read_cpu, ("cpu",)),
+                                    ("ram", self._read_ram, ("ram",))):
+            if getattr(self, name) is None:
+                continue
+            try:
+                values = reader()
+                values = values if isinstance(values, tuple) else (values,)
+                for key, value in zip(keys_, values):
+                    now[key], _ = value, self.history[key].append(value)
+            except Exception:
+                setattr(self, name, None)                 # never let monitoring break a run
+        return now
+
+    # -- rendering ---------------------------------------------------------- #
+    @staticmethod
+    def _band(fraction: float, low_is_bad: bool = True) -> str:
+        """Idle GPU means raise -nproc; nearly full memory means lower it."""
+        if low_is_bad:
+            return "ok" if fraction >= 0.7 else ("warn" if fraction >= 0.3 else "err")
+        return "err" if fraction >= 0.9 else ("warn" if fraction >= 0.75 else "ok")
+
+    def line(self) -> str:
+        """
+        Compact markup for the progress bar. Parts are dropped from the right when the
+        terminal is too narrow, so GPU — the number you tune -nproc by — survives longest.
+        """
+        now, parts = self.sample(), []                    # (plain text, markup)
+        if "gpu_util" in now:
+            util, mem = now["gpu_util"], now.get("gpu_mem", 0.0)
+            plain = f"GPU {util:3.0f}% {mem:.1f}/{self.gpu_total:.0f}GB"
+            parts.append((plain, f"[{self._band(util / 100)}]GPU {util:3.0f}%[/] "
+                                 f"[{self._band(mem / self.gpu_total if self.gpu_total else 0, False)}]"
+                                 f"{mem:.1f}/{self.gpu_total:.0f}GB[/]"))
+        if "cpu" in now:
+            cores = os.cpu_count() or 1
+            style = "warn" if now["cpu"] > 0.95 * cores else "dim"   # busy is fine, oversubscribed is not
+            plain = f"CPU {now['cpu'] * 100:.0f}%"
+            parts.append((plain, f"[{style}]{plain}[/]"))
+        if "ram" in now:
+            plain = f"RAM {now['ram']:.1f}/{self.ram_total:.0f}GB"
+            parts.append((plain, f"[{self._band(now['ram'] / self.ram_total if self.ram_total else 0, False)}]"
+                                 f"{plain}[/]"))
+
+        budget = LOG.term.width - 60                      # what the bar itself needs
+        while parts and 2 + sum(len(p) for p, _ in parts) + 3 * (len(parts) - 1) > budget:
+            parts.pop()
+        return "[dim]│[/dim] " + " [dim]·[/dim] ".join(m for _, m in parts) if parts else ""
+
+    def summary(self) -> dict:
+        """min / mean / max per metric, no time series kept."""
+        out = {}
+        for key, values in self.history.items():
+            if values:
+                out[key] = {"mean": round(float(np.mean(values)), 2),
+                            "peak": round(float(np.max(values)), 2)}
+        out["backends"] = {"gpu": self.gpu, "cpu": self.cpu, "ram": self.ram}
+        if self.gpu_total:
+            out["gpu_total_gb"] = round(self.gpu_total, 1)
+        if self.ram_total:
+            out["ram_total_gb"] = round(self.ram_total, 1)
+        return out
+
+    def report(self):
+        data, parts = self.summary(), []
+        if "gpu_util" in data:
+            parts.append(f"GPU util mean {data['gpu_util']['mean']:.0f}% peak {data['gpu_util']['peak']:.0f}%")
+        if "gpu_mem" in data:
+            parts.append(f"GPU mem peak {data['gpu_mem']['peak']:.1f}/{self.gpu_total:.1f} GB")
+        if "cpu" in data:
+            parts.append(f"CPU mean {data['cpu']['mean'] * 100:.0f}% of {(os.cpu_count() or 1) * 100}%")
+        if "ram" in data:
+            parts.append(f"RAM peak {data['ram']['peak']:.1f}/{self.ram_total:.1f} GB")
+        if parts:
+            LOG(f"[dim]resources ·[/dim] " + " [dim]·[/dim] ".join(parts))
+
+
+MONITOR = Monitor()
+
+
+class ResourceColumn(ProgressColumn):
+    """Live resource readout appended to the bar. rich re-renders it at most once a second."""
+
+    max_refresh = 1.0
+
+    def render(self, task) -> Text:
+        return Text.from_markup(MONITOR.line(), style="none")
+
+
+def progress_columns(unit: str) -> tuple:
+    return ("[progress.description]{task.description}", BarColumn(), MofNCompleteColumn(), unit,
+            TimeElapsedColumn(), "eta", TimeRemainingColumn(), ResourceColumn())
 
 
 # ============================================================================ #
@@ -268,9 +452,7 @@ def evaluate(frames: list, spec: str, batch_size: int, device: str, dtype: str,
     loader = torch_geometric.dataloader.DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     energy_chunks, force_chunks, t0 = [], [], time.perf_counter()
-    columns = ("[progress.description]{task.description}", BarColumn(), MofNCompleteColumn(),
-               "batches", TimeElapsedColumn(), "eta", TimeRemainingColumn())
-    with Progress(*columns, console=LOG.term, transient=True) as progress:
+    with Progress(*progress_columns("batches"), console=LOG.term, transient=True) as progress:
         task = progress.add_task("evaluating", total=len(loader))
         for batch in loader:
             batch = batch.to(dev)
@@ -305,7 +487,7 @@ def evaluate_ase(frames: list, spec: str, device: str, dtype: str, prefix: str, 
 
     ekey, fkey = keys(prefix)
     t0 = time.perf_counter()
-    with Progress(console=LOG.term, transient=True) as progress:
+    with Progress(*progress_columns("structures"), console=LOG.term, transient=True) as progress:
         task = progress.add_task("evaluating", total=len(frames))
         for atoms in frames:
             work = Atoms(numbers=atoms.numbers, positions=atoms.positions, cell=atoms.cell, pbc=atoms.pbc)
@@ -773,6 +955,8 @@ def report_relax(frames: list, prefix: str, done_now: int, wall: float,
         f"[err]{(~ok).sum()}[/err] failed · {elapsed(wall)} · {rate:.2f} struct/s · "
         f"{nproc} worker(s)" + (f" · GPU peak {gpu_mb:,.0f} MB/worker" if gpu_mb else ""))
 
+    MONITOR.report()
+
     stuck = [i for i, a in enumerate(frames) if not a.info.get(f"{prefix}converged", False)][:10]
     if stuck:
         LOG(f"[dim]not converged: index {', '.join(map(str, stuck))}"
@@ -781,7 +965,8 @@ def report_relax(frames: list, prefix: str, done_now: int, wall: float,
         if a.info.get(f"{prefix}error"):
             LOG(f"[err]failed[/err] index {i}: {a.info[f'{prefix}error']}")
 
-    return {"converged": int(converged.sum()), "failed": int((~ok).sum()), "n": len(frames),
+    return {"resources": MONITOR.summary(),
+            "converged": int(converged.sum()), "failed": int((~ok).sum()), "n": len(frames),
             "steps": {"min": int(steps.min()), "median": float(np.median(steps)), "max": int(steps.max())},
             "Erelax_eV_per_atom": {"mean": float(erelax.mean()), "min": float(erelax.min())},
             "walltime_s": round(wall, 1), "struct_per_s": round(rate, 3),
@@ -886,10 +1071,8 @@ def cmd_relax(args) -> int:
     part_fh = open(part, "a", encoding="utf-8")
     traj_fh = open(Path(args.outdir) / args.traj, "w", encoding="utf-8") if args.traj else None
     gpu_mb, t_run = 0.0, time.perf_counter()
-    columns = ("[progress.description]{task.description}", BarColumn(), MofNCompleteColumn(),
-               "structures", TimeElapsedColumn(), "eta", TimeRemainingColumn())
     try:
-        with Progress(*columns, console=LOG.term, transient=True) as progress:
+        with Progress(*progress_columns("structures"), console=LOG.term, transient=True) as progress:
             task = progress.add_task("relaxing", total=len(todo))
 
             def collect(res):
@@ -1032,6 +1215,7 @@ def cmd_calc(args) -> int:
                       device=device, dtype=args.dtype, prefix=prefix, head=args.head)
 
     LOG.rule("results")
+    MONITOR.report()
     Path(args.outdir).mkdir(parents=True, exist_ok=True)
     prediction = report_prediction(frames, prefix)
 
@@ -1055,7 +1239,8 @@ def cmd_calc(args) -> int:
                "input": os.path.abspath(args.input), "output": os.path.abspath(outfile),
                "model": model, "batch_size": args.batch_size, "device": device, "dtype": args.dtype,
                "prefix": prefix, "ref_prefix": ref, "prediction": prediction, "errors": errors,
-               "group_by": args.group, "by_group": by_group, "versions": versions()}
+               "group_by": args.group, "by_group": by_group, "resources": MONITOR.summary(),
+               "versions": versions()}
     json_file = Path(args.outdir) / f"{stem}_metrics.json"
     json_file.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
     LOG(f"json [key]{json_file}[/key] · total [hi]{elapsed(time.perf_counter() - t0)}[/hi]")
