@@ -148,7 +148,7 @@
 <div class="wrap">
 
 <header>
-  <p class="eyebrow">mflow v0.3.0 · 执行细节</p>
+  <p class="eyebrow">mflow v0.4.0 · 执行细节</p>
   <h1>约定与风险</h1>
   <p class="lede">
     这份文档记录 <code>mflow.py</code> 在计算过程中<strong>替你做了什么决定</strong>：
@@ -161,6 +161,8 @@
       <li><a href="#forces">力：不需要对齐</a></li>
       <li><a href="#units">单位与符号</a></li>
       <li><a href="#labels">标签与自动探测</a></li>
+      <li><a href="#preserve">已有标签会被保留吗</a></li>
+      <li><a href="#group">分类（-group）</a></li>
       <li><a href="#numeric">数值与可复现性</a></li>
       <li><a href="#metrics">统计量的定义</a></li>
       <li><a href="#plot">绘图的取舍</a></li>
@@ -349,8 +351,111 @@
 </section>
 
 <!-- ─────────────────────────────────────────────────────────────── -->
+<section id="preserve">
+  <h2><span class="num">05</span>已有标签会被保留吗</h2>
+  <p class="sub">会。读 → 算 → 写 全程不动你的标签</p>
+  <p>
+    送进 MACE 的是一个<strong>只含几何信息的副本</strong>（原子序数 / 坐标 / 晶胞 / pbc），
+    原始的 <code>info</code> 和 <code>arrays</code> 根本不参与计算，写出时原样带回。
+    实测一个同时带以下内容的文件，全部原样保留：
+  </p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>输入里的东西</th><th>输出</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">config_type=bulk</td><td>保留（可直接拿来 <code>-group</code>）</td></tr>
+        <tr><td class="mono">step=0 · temperature_K=300.0</td><td>保留</td></tr>
+        <tr><td class="mono">source="run A/2026"</td><td>保留，带空格的字符串自动加引号</td></tr>
+        <tr><td class="mono">dft_energy · dft_forces</td><td>保留</td></tr>
+        <tr><td class="mono">magmom_init（自定义 per-atom 数组）</td><td>保留</td></tr>
+        <tr><td class="mono">calculator 上的 energy / forces / stress</td><td>搬进 info/arrays 后保留（见下）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>新增的只有这几个 key：</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th class="mono">新增</th><th>位置</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">&lt;prefix&gt;energy</td><td class="mono">info</td><td>MACE 总能量，eV</td></tr>
+        <tr><td class="mono">&lt;prefix&gt;forces</td><td class="mono">arrays</td><td>MACE 力，eV/Å</td></tr>
+        <tr><td class="mono">&lt;prefix&gt;dE</td><td class="mono">info</td><td>E0 对齐后的每原子能量误差（有符号），meV/atom</td></tr>
+        <tr><td class="mono">&lt;prefix&gt;dF</td><td class="mono">info</td><td>该结构的力 RMSE，meV/Å</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="call deci">
+    <span class="tag">decision</span>
+    <p>
+      ASE 读 extxyz 时，<strong>没有前缀</strong>的 <code>energy</code> / <code>forces</code> /
+      <code>stress</code> 会被塞进 <code>SinglePointCalculator</code> 而不是 info/arrays，
+      直接写回就会丢失。代码把 calculator 里的所有量都搬进 info/arrays：
+      第一维等于原子数的当成 per-atom 数组，其余当成 info。
+      <code>stress</code> / <code>dipole</code> / <code>magmom</code> 这三个形状可能和小体系的
+      原子数撞车，强制归入 info。
+    </p>
+  </div>
+  <div class="call risk">
+    <span class="tag">risk · 中</span>
+    <p>
+      <strong>同名前缀会被覆盖。</strong>用同一个 <code>-prefix</code> 重跑，旧的
+      <code>&lt;prefix&gt;energy</code> / <code>dE</code> / <code>dF</code> 会被新结果盖掉。
+      要并排比较两个模型，就用不同前缀（<code>-prefix mpa0_</code> 和 <code>-prefix omat_</code>）。
+    </p>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="group">
+  <h2><span class="num">06</span>分类（-group）</h2>
+  <p class="sub">group_of() · report_groups() · report_worst()</p>
+  <p>
+    <code>-group KEY</code> 用数据集<strong>已有的标签</strong>把误差拆开，按 RMSE 从大到小排，
+    并在图上多出一列排名条形图。KEY 可以是：
+  </p>
+  <ul>
+    <li>任意 <code>info</code> 键 —— <code>config_type</code>、<code>step</code>、<code>temperature_K</code>…</li>
+    <li>虚拟键 <code>formula</code>（化学式）、<code>natoms</code>（原子数）</li>
+    <li>上一轮自己写进去的 <code>&lt;prefix&gt;dE</code> / <code>&lt;prefix&gt;dF</code> —— 即"按误差大小分类"</li>
+  </ul>
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      数值型的键如果有<strong>超过 8 个不同取值</strong>，自动按<strong>四分位</strong>切成
+      Q1–Q4 四档，标签写明区间；取值少于 8 个则每个值一组。字符串键一律按值分组。
+    </p>
+  </div>
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      <strong>E0 只在整个数据集上拟合一次</strong>，各组共用同一组 δ，组间因此可比。
+      如果每组各自拟合，每组都会自动消掉自己的系统偏移，组间差异就被抹平了 —— 那不是我们想要的。
+    </p>
+  </div>
+  <div class="call conv">
+    <span class="tag">convention</span>
+    <p>
+      组内能量 RMSE 按<strong>结构</strong>等权平均；组内力 RMSE 按<strong>分量</strong>汇总
+      （Σ误差² / Σ分量数），所以大结构在力的统计里权重更大 —— 和全局力 RMSE 的定义一致。
+    </p>
+  </div>
+  <div class="call risk">
+    <span class="tag">risk · 低</span>
+    <p>
+      parity 图只在<strong>组数 ≤ 12</strong> 时按组上色，超过就退回单色/hexbin；
+      表格和条形图不受此限制。组太多（比如 <code>-group formula</code> 撞上几十种化学式）时，
+      条形图会很长，建议先用 <code>natoms</code> 或自定义标签粗分。
+    </p>
+  </div>
+  <p>
+    实测：三组人为注入不同噪声（bulk 4 / surface 30 / cluster 120 meV·Å⁻¹）的数据，
+    <code>-group config_type</code> 给出的力 RMSE 是 4.10 / 30.90 / 115.19 —— 分类结果和注入值吻合。
+  </p>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
 <section id="numeric">
-  <h2><span class="num">05</span>数值与可复现性</h2>
+  <h2><span class="num">07</span>数值与可复现性</h2>
   <p class="sub">load_model() · evaluate()</p>
   <ul>
     <li><strong>batch size 不改变结果</strong>，只影响速度和显存；批内结构相互独立。
@@ -381,7 +486,7 @@
 
 <!-- ─────────────────────────────────────────────────────────────── -->
 <section id="metrics">
-  <h2><span class="num">06</span>统计量的定义</h2>
+  <h2><span class="num">08</span>统计量的定义</h2>
   <p class="sub">stats()</p>
   <pre><code>d      = (pred - ref) * 1000        # meV/atom 或 meV/Å
 MAE    = mean(|d|)
@@ -403,7 +508,7 @@ R²     = corrcoef(ref, pred)² </code></pre>
 
 <!-- ─────────────────────────────────────────────────────────────── -->
 <section id="plot">
-  <h2><span class="num">07</span>绘图的取舍</h2>
+  <h2><span class="num">09</span>绘图的取舍</h2>
   <p class="sub">make_plot() · _parity() · _hist()</p>
   <ul>
     <li>能量 parity 画的是 <strong>E0 对齐之后</strong>的每原子能量，所以两轴可以直接比，
@@ -424,7 +529,7 @@ R²     = corrcoef(ref, pred)² </code></pre>
 
 <!-- ─────────────────────────────────────────────────────────────── -->
 <section id="decisions">
-  <h2><span class="num">08</span>为跑通而做的决定</h2>
+  <h2><span class="num">10</span>为跑通而做的决定</h2>
   <p class="sub">这些是工程取舍，不是物理</p>
 
   <div class="call deci">
@@ -469,7 +574,7 @@ R²     = corrcoef(ref, pred)² </code></pre>
 
 <!-- ─────────────────────────────────────────────────────────────── -->
 <section id="risks">
-  <h2><span class="num">09</span>风险清单</h2>
+  <h2><span class="num">11</span>风险清单</h2>
   <p class="sub">出问题时按这张表查</p>
   <div class="tablewrap">
     <table>
@@ -513,6 +618,16 @@ R²     = corrcoef(ref, pred)² </code></pre>
           <td>核对模型的元素列表；MACE-MP 覆盖 89 种元素</td>
         </tr>
         <tr>
+          <td>同名前缀重跑被覆盖</td><td><span class="sev mid">中</span></td>
+          <td>旧的 &lt;prefix&gt;energy / dE / dF 被新结果盖掉</td>
+          <td>比较两个模型时用不同 <code>-prefix</code></td>
+        </tr>
+        <tr>
+          <td>-group 的键在部分结构上缺失</td><td><span class="sev low">低</span></td>
+          <td>warning: <code>missing from n/N structures</code>，本轮不分组</td>
+          <td>补齐标签，或换一个所有结构都有的键</td>
+        </tr>
+        <tr>
           <td>多 head 模型用了默认 head</td><td><span class="sev low">低</span></td>
           <td>能量零点整体偏移</td>
           <td>显式 <code>-head</code></td>
@@ -533,7 +648,7 @@ R²     = corrcoef(ref, pred)² </code></pre>
 </section>
 
 <footer>
-  MFlow v0.3.0 · docs/conventions.html · MengnanCui/MFlow
+  MFlow v0.4.0 · docs/conventions.html · MengnanCui/MFlow
 </footer>
 
 </div>

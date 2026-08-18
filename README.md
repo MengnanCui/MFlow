@@ -1,6 +1,6 @@
 # MFlow
 
-单文件机器学习势工具箱（v0.3.0，`mflow.py`，约 650 行）。当前功能：静态 MACE 计算能量和力。
+单文件机器学习势工具箱（v0.4.0，`mflow.py`，约 800 行）。当前功能：静态 MACE 计算能量和力，按标签分类误差。
 
 计算过程中的**约定、默认和风险点**写在 [`docs/conventions.html`](docs/conventions.html) —— 尤其是能量对齐那一节，看数字之前先看它。
 
@@ -15,6 +15,7 @@ python mflow.py calc -in data.xyz                        # 默认模型，batch 
 python mflow.py calc -in data.xyz -model mpa -batch 64   # 换成在线下载的基础模型
 python mflow.py calc -in data.xyz -model ./my.model -prefix mace_
 python mflow.py calc -in data.xyz -ref dft_              # 和 dft_energy/dft_forces 比较
+python mflow.py calc -in data.xyz -group config_type     # 按已有标签把误差拆开
 python mflow.py plot -in data_mace.xyz -ref dft_         # 只重画，不重算
 ```
 
@@ -28,6 +29,7 @@ python mflow.py plot -in data_mace.xyz -ref dft_         # 只重画，不重算
 | `-prefix` | `mpa0_` | 输出标签前缀 → `mpa0_energy` / `mpa0_forces` |
 | `-ref` | 自动探测 | 参考标签前缀（`dft_` / `REF_` / 无前缀 `energy`） |
 | `-e0` | `fit` | 能量对齐：`fit` 逐元素最小二乘 ／ `mean` 单一常数 ／ `none` ／ json 文件 |
+| `-group` | 无 | 按已有标签分类误差：任意 info 键，或虚拟键 `formula` / `natoms`；数值键自动切四分位 |
 | `-out` `-outdir` `-log` | `<stem>_mace.xyz` `.` `py.log` | 输出位置 |
 | `-index` | `:` | ASE 切片，如 `:100` |
 | `-device` `-dtype` | `auto` `float64` | cuda/cpu/mps；float64/float32 |
@@ -72,6 +74,37 @@ E_pred(i) - E_ref(i) = Σ_j n_ij · δ_j + ε_i
 力不受 E0 影响，无需对齐。
 
 ⚠️ δ 是从被评估的数据里拟合的，会吸收模型真实的系统性偏差 —— 详见 `docs/conventions.html`。
+
+## 分类（-group）
+
+用数据集**已有的标签**把误差拆开，按 RMSE 从大到小排，图上多出一列排名条形图：
+
+```
+by config_type  (worst first)
+group       N     E MAE    E RMSE    F RMSE
+cluster    20    105.85    124.66    115.19
+surface    20     29.48     40.78     30.90
+bulk       20     11.93     13.85      4.10
+
+worst 5 structures by |ΔE|
+#       group    formula    atoms         ΔE    F RMSE
+5     cluster      O3Si8       11    -236.91     89.19
+20    cluster       O2Si        6    -212.26    125.90
+```
+
+KEY 可以是任意 `info` 键（`config_type` / `step` / `temperature_K`…）、虚拟键 `formula` / `natoms`，
+或**上一轮自己写进文件的** `<prefix>dE` / `<prefix>dF` —— 即按误差大小分类。数值键超过 8 个取值时自动切四分位。
+
+每次跑完还会把 `<prefix>dE`（meV/atom，有符号）和 `<prefix>dF`（该结构力 RMSE，meV/Å）写进输出 xyz，
+方便你自己排序、筛选，或下一轮直接 `-group mpa0_dE`。
+
+## 标签保留
+
+**输入 xyz 里已有的标签全部保留**：`config_type`、`step`、自定义 per-atom 数组、
+挂在 calculator 上的 `energy`/`forces`/`stress`，都原样写出。MACE 拿到的是只含几何的副本，碰不到你的标签。
+只新增 `<prefix>energy`、`<prefix>forces`、`<prefix>dE`、`<prefix>dF` 四个 key。
+
+⚠️ 用同一个 `-prefix` 重跑会覆盖上一轮的这四个 key；比较两个模型请用不同前缀。
 
 ## 说明
 

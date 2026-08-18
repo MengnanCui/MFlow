@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MFlow v0.3.0 — single-file MACE toolkit.
+MFlow v0.4.0 — single-file MACE toolkit.
 
     calc : evaluate an xyz dataset with MACE -> energies & forces
     plot : re-analyse / re-plot an already evaluated file
@@ -33,7 +33,7 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, TimeElapsedCo
 from rich.table import Table
 from rich.theme import Theme
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # --- plot style (publication) -------------------------------------------------
 COLORS = ["#2470a0", "#ca3e47", "#f29c2b", "#1f640a", "#2ca02c", "#9467bd",
@@ -54,13 +54,16 @@ MODEL_ALIASES = {"mp": "medium", "mp0": "medium", "mpa": "medium-mpa-0", "mpa0":
                  "omat": "medium-omat-0", "omat0": "medium-omat-0"}
 REF_CANDIDATES = ["", "REF_", "ref_", "dft_", "DFT_", "pbe_", "scan_"]
 HEXBIN_ABOVE, PLOT_MAX_POINTS = 20_000, 500_000
+# shapes that could be mistaken for a per-atom array in a small cell
+AMBIGUOUS = {"stress", "dipole", "magmom"}
 
 EXAMPLES = """examples
   python mflow.py calc -in data.xyz                        # default model, batch 32
   python mflow.py calc -in data.xyz -model mpa -batch 64   # download a foundation model
   python mflow.py calc -in data.xyz -model ./my.model -prefix mace_
   python mflow.py calc -in data.xyz -ref dft_              # compare with dft_energy/dft_forces
-  python mflow.py plot -in data_mace.xyz -ref dft_         # re-plot, no recompute"""
+  python mflow.py calc -in data.xyz -group config_type     # errors split by label
+  python mflow.py plot -in data_mace.xyz -group formula    # re-plot, no recompute"""
 
 
 # ============================================================================ #
@@ -153,13 +156,16 @@ def has_labels(atoms: Atoms, prefix: str, forces: bool = True) -> bool:
 def read_dataset(infile: str, index: str = ":") -> list:
     frames = ase.io.read(infile, index=index)
     frames = [frames] if isinstance(frames, Atoms) else frames
-    # extxyz hides plain energy/forces in a SinglePointCalculator — put them back
+    # ASE parks plain energy/forces/stress/... in a SinglePointCalculator instead of
+    # info/arrays. Move everything across, or it is silently dropped on write.
     for atoms in frames:
-        results = getattr(atoms.calc, "results", None) or {}
-        if "energy" in results and "energy" not in atoms.info:
-            atoms.info["energy"] = float(results["energy"])
-        if "forces" in results and "forces" not in atoms.arrays:
-            atoms.arrays["forces"] = np.asarray(results["forces"])
+        for key, value in (getattr(atoms.calc, "results", None) or {}).items():
+            value = np.asarray(value)
+            per_atom = value.ndim >= 1 and value.shape[0] == len(atoms) and key not in AMBIGUOUS
+            if per_atom:
+                atoms.arrays.setdefault(key, value)
+            elif key not in atoms.info:
+                atoms.info[key] = float(value) if value.ndim == 0 else value
         atoms.calc = None
 
     n_atoms = np.array([len(a) for a in frames])
@@ -364,7 +370,8 @@ def compare(frames: list, pred: str, ref: str, e0="fit") -> tuple[dict, dict]:
     et_pred, et_ref = energies(frames, pred), energies(frames, ref)  # total energies, eV
     delta, C, zs = align_e0(frames, et_pred - et_ref, e0)
 
-    series = {"e_pred": (et_pred - C @ delta) / n, "e_ref": et_ref / n}
+    series = {"e_pred": (et_pred - C @ delta) / n, "e_ref": et_ref / n, "n_atoms": n}
+    series["dE"] = (series["e_pred"] - series["e_ref"]) * 1000            # meV/atom, signed
     errors = {"energy": stats(series["e_pred"], series["e_ref"], 1000),
               "energy_raw": stats(et_pred / n, et_ref / n, 1000),
               "e0_mode": e0 if isinstance(e0, str) else "user",
@@ -372,6 +379,10 @@ def compare(frames: list, pred: str, ref: str, e0="fit") -> tuple[dict, dict]:
     if keys(ref)[1] in frames[0].arrays:
         series["f_pred"], series["f_ref"] = forces(frames, pred), forces(frames, ref)
         errors["forces"] = stats(series["f_pred"], series["f_ref"], 1000)  # forces need no alignment
+        fp, fr = keys(pred)[1], keys(ref)[1]
+        sq = np.array([np.sum((a.arrays[fp] - a.arrays[fr]) ** 2) for a in frames])  # eV²/Å²
+        series["dF"] = np.sqrt(sq / (3 * n)) * 1000                        # meV/Å, per structure
+        series["sqF"] = sq
     return errors, series
 
 
@@ -400,6 +411,77 @@ def report_prediction(frames: list, prefix: str) -> dict:
 
 
 # ============================================================================ #
+#  grouping — split the errors by whatever label the dataset already carries
+# ============================================================================ #
+
+def group_of(frames: list, key: str | None) -> np.ndarray | None:
+    """
+    Per-structure group labels taken from an existing info key (config_type, step, ...)
+    or from the virtual keys `formula` / `natoms`. A numeric key with more than 8 distinct
+    values is cut into quartiles, so `-group mpa0_dE` or `-group temperature_K` also work.
+    """
+    if not key:
+        return None
+    if key == "formula":
+        values = np.array([a.get_chemical_formula(mode="hill", empirical=True) for a in frames])
+    elif key == "natoms":
+        values = np.array([len(a) for a in frames])
+    elif all(key in a.info for a in frames):
+        values = np.array([a.info[key] for a in frames])
+    else:
+        missing = sum(key not in a.info for a in frames)
+        LOG(f"[warn]-group {key}: missing from {missing}/{len(frames)} structures — not grouping[/warn]")
+        return None
+
+    if values.ndim > 1:
+        LOG(f"[warn]-group {key}: values are arrays, not labels — not grouping[/warn]")
+        return None
+    if values.dtype.kind in "iuf" and len(np.unique(values)) > 8:
+        edges = np.quantile(values.astype(float), [0.0, 0.25, 0.5, 0.75, 1.0])
+        which = np.clip(np.searchsorted(edges[1:-1], values.astype(float), side="right"), 0, 3)
+        values = np.array([f"Q{i + 1} [{edges[i]:.3g}, {edges[i + 1]:.3g}]" for i in which])
+    return values.astype(str)
+
+
+def report_groups(groups: np.ndarray, series: dict, key: str) -> dict:
+    """One row per group, worst energy RMSE first — the fast way to see which family fails."""
+    out = {}
+    for name in dict.fromkeys(groups):
+        m = groups == name
+        row = {"N": int(m.sum()),
+               "E_MAE": float(np.abs(series["dE"][m]).mean()),
+               "E_RMSE": float(np.sqrt(np.mean(series["dE"][m] ** 2)))}
+        if "sqF" in series:
+            row["F_RMSE"] = float(np.sqrt(series["sqF"][m].sum() / (3 * series["n_atoms"][m]).sum()) * 1000)
+        out[name] = row
+
+    order = sorted(out, key=lambda k: -out[k]["E_RMSE"])
+    has_f = "sqF" in series
+    LOG(table(f"by {key}  (worst first)",
+              ["group", "N", "E MAE", "E RMSE", "F RMSE"] if has_f else ["group", "N", "E MAE", "E RMSE"],
+              [[g, f"{out[g]['N']:,}", num(out[g]["E_MAE"]), num(out[g]["E_RMSE"])]
+               + ([num(out[g]["F_RMSE"])] if has_f else []) for g in order],
+              styles=["key"]))
+    LOG("[dim]E in meV/atom, F in meV/Å · the E0 shift is fitted once on the whole dataset, "
+        "so the groups stay comparable[/dim]")
+    return out
+
+
+def report_worst(frames: list, series: dict, groups: np.ndarray | None, top: int = 5):
+    """The structures to look at first, by |ΔE| per atom."""
+    order = np.argsort(-np.abs(series["dE"]))[:top]
+    has_f = "dF" in series
+    LOG(table(f"worst {len(order)} structures by |ΔE|",
+              ["#", "group", "formula", "atoms", "ΔE", "F RMSE"] if has_f else
+              ["#", "group", "formula", "atoms", "ΔE"],
+              [[i, groups[i] if groups is not None else "—",
+                frames[i].get_chemical_formula(mode="hill", empirical=True), len(frames[i]),
+                f"{series['dE'][i]:+.2f}"] + ([num(series["dF"][i])] if has_f else [])
+               for i in order], styles=["dim", "key"]))
+    LOG("[dim]index is the position in the input file · ΔE in meV/atom, F RMSE in meV/Å[/dim]")
+
+
+# ============================================================================ #
 #  plots — one figure, everything on it
 # ============================================================================ #
 
@@ -411,22 +493,40 @@ def _thin(*arrays):
     return [a[idx] for a in arrays]
 
 
-def _parity(ax, x, y, xlabel, ylabel, title, note):
-    x, y = _thin(np.asarray(x, float), np.asarray(y, float))
+def _parity(ax, x, y, xlabel, ylabel, title, note, groups=None):
+    x, y, groups = _thin(np.asarray(x, float), np.asarray(y, float),
+                         np.asarray(groups) if groups is not None else np.zeros(len(x)))
     lo, hi = min(x.min(), y.min()), max(x.max(), y.max())
     pad = (hi - lo) * 0.05 or 1.0
-    if x.size > HEXBIN_ABOVE:
+    names = sorted(set(groups.tolist()))
+    size = 80 if x.size <= 500 else (40 if x.size <= 3000 else 12)  # readable when points overlap
+    if 1 < len(names) <= 12:
+        for i, name in enumerate(names):
+            m = groups == name
+            ax.scatter(x[m], y[m], color=COLORS[i % len(COLORS)], marker=MARKERS[i % len(MARKERS)],
+                       alpha=0.7, s=size, edgecolors=COLORS[i % len(COLORS)], label=str(name),
+                       linewidths=1.5 if size >= 40 else 0.5, zorder=3)
+        ax.legend(framealpha=0.5, fontsize=9, loc="lower right", markerscale=1.2)
+    elif x.size > HEXBIN_ABOVE:
         from matplotlib.colors import LogNorm
         hb = ax.hexbin(x, y, gridsize=60, cmap="viridis", mincnt=1, norm=LogNorm())
         ax.figure.colorbar(hb, ax=ax, label="counts")
     else:
-        size = 80 if x.size <= 500 else (40 if x.size <= 3000 else 12)
         ax.scatter(x, y, color=COLORS[0], marker=MARKERS[0], alpha=0.7, s=size,
                    edgecolors=COLORS[0], linewidths=1.5 if size >= 40 else 0.5, zorder=3)
     ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "k", ls=LINESTYLES[1], lw=2, zorder=4)
     ax.set(xlim=(lo - pad, hi + pad), ylim=(lo - pad, hi + pad), xlabel=xlabel, ylabel=ylabel, title=title)
     ax.text(0.04, 0.96, note, transform=ax.transAxes, fontsize=12, va="top",
             bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.6, ec="none"))
+
+
+def _bars(ax, names: list, values: list, xlabel: str, color: str):
+    """Horizontal so the group names stay readable; worst group on top."""
+    order = np.argsort(values)
+    ax.barh([str(names[i]) for i in order], [values[i] for i in order], color=color,
+            alpha=0.8, edgecolor="black", linewidth=1.0, zorder=2)
+    ax.set_xlabel(xlabel)
+    ax.tick_params(axis="y", labelsize=11)
 
 
 def _hist(ax, values, xlabel, color, zero_line=True):
@@ -438,8 +538,12 @@ def _hist(ax, values, xlabel, color, zero_line=True):
 
 
 def make_plot(frames: list, pred: str, ref: str | None, errors: dict | None,
-              series: dict | None, outfile: str):
-    """With a reference: 2x2 parity + error histograms. Without: prediction distributions."""
+              series: dict | None, outfile: str, groups=None, by_group: dict | None = None):
+    """
+    No reference        : 1x2 prediction distributions.
+    Reference           : 2x2 parity + error histograms.
+    Reference + -group  : 2x3, the extra column ranks the groups by RMSE.
+    """
     tag = lambda p: (p or "pred").rstrip("_").upper()
 
     if ref is None or errors is None:
@@ -451,19 +555,33 @@ def make_plot(frames: list, pred: str, ref: str | None, errors: dict | None,
     else:
         # energies here are already E0-aligned, so the axes are directly comparable
         e_pred, e_ref, es = series["e_pred"], series["e_ref"], errors["energy"]
-        fig, axes = plt.subplots(2, 2, figsize=(11, 8.5))
+        ncols = 3 if by_group else 2
+        fig, axes = plt.subplots(2, ncols, figsize=(5.5 * ncols + 0.5, 8.5))
         _parity(axes[0, 0], e_ref, e_pred, f"{tag(ref)} energy (eV/atom)",
                 f"{tag(pred)} energy (eV/atom)", f"Energy · E0 {errors['e0_mode']}",
-                f"RMSE = {es['RMSE']:.2f} meV/atom\nR$^2$ = {es['R2']:.4f}\nN = {es['N']:,}")
-        _hist(axes[1, 0], (e_pred - e_ref) * 1000, "Energy error (meV/atom)", COLORS[0])
+                f"RMSE = {es['RMSE']:.2f} meV/atom\nR$^2$ = {es['R2']:.4f}\nN = {es['N']:,}", groups)
+        _hist(axes[1, 0], series["dE"], "Energy error (meV/atom)", COLORS[0])
         if "forces" in errors:
             f_pred, f_ref, fs = series["f_pred"], series["f_ref"], errors["forces"]
+            # one group label per force component
+            per_comp = None if groups is None else np.repeat(groups, (3 * series["n_atoms"]).astype(int))
             _parity(axes[0, 1], f_ref, f_pred, rf"{tag(ref)} force comp. (eV/$\mathrm{{\AA}}$)",
                     rf"{tag(pred)} force comp. (eV/$\mathrm{{\AA}}$)", "Forces",
-                    f"RMSE = {fs['RMSE']:.1f} meV/$\\mathrm{{\\AA}}$\nR$^2$ = {fs['R2']:.4f}\nN = {fs['N']:,}")
+                    f"RMSE = {fs['RMSE']:.1f} meV/$\\mathrm{{\\AA}}$\nR$^2$ = {fs['R2']:.4f}\nN = {fs['N']:,}",
+                    per_comp)
             _hist(axes[1, 1], (f_pred - f_ref) * 1000, r"Force error (meV/$\mathrm{\AA}$)", COLORS[1])
         else:
             axes[0, 1].axis("off"), axes[1, 1].axis("off")
+
+        if by_group:
+            names = list(by_group)
+            _bars(axes[0, 2], names, [by_group[g]["E_RMSE"] for g in names],
+                  "Energy RMSE (meV/atom)", COLORS[0])
+            if "F_RMSE" in by_group[names[0]]:
+                _bars(axes[1, 2], names, [by_group[g]["F_RMSE"] for g in names],
+                      r"Force RMSE (meV/$\mathrm{\AA}$)", COLORS[1])
+            else:
+                axes[1, 2].axis("off")
 
     for ax in np.atleast_1d(axes).ravel():
         ax.tick_params(which="both", direction="in")
@@ -503,6 +621,19 @@ def pick_device(device: str) -> str:
         return "cpu"
 
 
+def tag_structures(frames: list, prefix: str, series: dict):
+    """
+    Per-structure diagnostics into info, so the file itself can be sorted, filtered or
+    fed back to `-group <prefix>dE`:  dE in meV/atom (signed), dF in meV/Å (RMSE).
+    """
+    for i, atoms in enumerate(frames):
+        atoms.info[f"{prefix}dE"] = float(series["dE"][i])
+        if "dF" in series:
+            atoms.info[f"{prefix}dF"] = float(series["dF"][i])
+    extra = f" / {prefix}dF" if "dF" in series else ""
+    LOG(f"[dim]per-structure diagnostics written as {prefix}dE{extra}[/dim]")
+
+
 def parse_e0(value: str):
     """'fit' | 'mean' | 'none' as is; anything else is a json file of per-element shifts."""
     return value if value in ("fit", "mean", "none") else json.loads(Path(value).read_text(encoding="utf-8"))
@@ -511,7 +642,7 @@ def parse_e0(value: str):
 def resolve_ref(frames: list, requested: str | None, pred: str) -> str | None:
     if requested is None:
         ref = find_ref(frames, exclude=pred)
-        LOG(f"reference [key]{keys(ref)[0]}[/key] (auto)" if ref else
+        LOG(f"reference [key]{keys(ref)[0]}[/key] (auto)" if ref is not None else
             "[warn]no reference labels found — prediction only[/warn]")
         return ref
     ref = fix_prefix(requested)
@@ -533,7 +664,8 @@ def cmd_calc(args) -> int:
             "batch size": args.batch_size, "device": device,
             "dtype": args.dtype, "head": args.head or "—",
             "labels": " / ".join(keys(prefix)), "reference": args.ref_prefix or "auto",
-            "E0 align": args.e0, "output": outfile, "log": args.log})
+            "E0 align": args.e0, "group by": args.group or "—",
+            "output": outfile, "log": args.log})
     LOG(f"[dim]{versions()}[/dim]")
 
     LOG.rule("dataset")
@@ -546,21 +678,29 @@ def cmd_calc(args) -> int:
 
     LOG.rule("results")
     Path(args.outdir).mkdir(parents=True, exist_ok=True)
-    ase.io.write(outfile, frames, format="extxyz")
-    LOG(f"xyz [key]{outfile}[/key] · {len(frames)} structures")
-
     prediction = report_prediction(frames, prefix)
-    errors, series = compare(frames, prefix, ref, parse_e0(args.e0)) if ref else (None, None)
+
+    errors, series = compare(frames, prefix, ref, parse_e0(args.e0)) if ref is not None else (None, None)
+    groups = by_group = None
     if errors:
         report_errors(errors, prefix, ref)
+        tag_structures(frames, prefix, series)     # per-structure ΔE / ΔF into the file
+        groups = group_of(frames, args.group)
+        if groups is not None:
+            by_group = report_groups(groups, series, args.group)
+        report_worst(frames, series, groups)
+
+    ase.io.write(outfile, frames, format="extxyz")
+    LOG(f"xyz [key]{outfile}[/key] · {len(frames)} structures")
     if not args.no_plot:
-        make_plot(frames, prefix, ref, errors, series, str(Path(args.outdir) / f"{stem}_summary.png"))
+        make_plot(frames, prefix, ref, errors, series,
+                  str(Path(args.outdir) / f"{stem}_summary.png"), groups, by_group)
 
     metrics = {"mflow": __version__, "time": datetime.now().isoformat(timespec="seconds"),
                "input": os.path.abspath(args.input), "output": os.path.abspath(outfile),
                "model": model, "batch_size": args.batch_size, "device": device, "dtype": args.dtype,
                "prefix": prefix, "ref_prefix": ref, "prediction": prediction, "errors": errors,
-               "versions": versions()}
+               "group_by": args.group, "by_group": by_group, "versions": versions()}
     json_file = Path(args.outdir) / f"{stem}_metrics.json"
     json_file.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
     LOG(f"json [key]{json_file}[/key] · total [hi]{elapsed(time.perf_counter() - t0)}[/hi]")
@@ -577,11 +717,19 @@ def cmd_plot(args) -> int:
 
     ref = resolve_ref(frames, args.ref_prefix, pred)
     Path(args.outdir).mkdir(parents=True, exist_ok=True)
-    errors, series = compare(frames, pred, ref, parse_e0(args.e0)) if ref else (None, None)
+    errors, series = compare(frames, pred, ref, parse_e0(args.e0)) if ref is not None else (None, None)
+    groups = by_group = None
     if errors:
         report_errors(errors, pred, ref)
-        (Path(args.outdir) / f"{stem}_metrics.json").write_text(json.dumps(errors, indent=2), encoding="utf-8")
-    make_plot(frames, pred, ref, errors, series, str(Path(args.outdir) / f"{stem}_summary.png"))
+        groups = group_of(frames, args.group)
+        if groups is not None:
+            by_group = report_groups(groups, series, args.group)
+        report_worst(frames, series, groups)
+        (Path(args.outdir) / f"{stem}_metrics.json").write_text(
+            json.dumps({"errors": errors, "group_by": args.group, "by_group": by_group}, indent=2),
+            encoding="utf-8")
+    make_plot(frames, pred, ref, errors, series,
+              str(Path(args.outdir) / f"{stem}_summary.png"), groups, by_group)
     return 0
 
 
@@ -602,6 +750,10 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("-index", default=":", help="ase slice, e.g. ':100' [:]")
     common.add_argument("-ref", dest="ref_prefix", default=None, metavar="PREFIX",
                         help="reference label prefix, e.g. dft_ [auto-detect]")
+    common.add_argument("-group", default=None, metavar="KEY",
+                        help="split the errors by an existing label: any info key "
+                             "(config_type, step, ...) or the virtual keys formula / natoms. "
+                             "A numeric key is cut into quartiles")
     common.add_argument("-e0", default="fit", metavar="MODE",
                         help="how to align the atomic reference before comparing energies: "
                              "fit (per-element least squares) | mean (one shared shift) | "
