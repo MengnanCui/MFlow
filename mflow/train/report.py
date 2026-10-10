@@ -24,9 +24,12 @@ from ..data import group_of, read_dataset
 from ..log import LOG, num, table
 from ..report import Report
 from ..style import COLORS, LINESTYLES, MARKERS, plt
+from ..thresholds import section
 
-GRADES = [("excellent", 5.0, 20.0), ("good", 10.0, 50.0)]   # E meV/atom, F meV/Å (AtomisticSkills bands)
-OVERFIT_RATIO = 1.5      # final valid loss vs best valid loss
+_T = section("train")    # mflow/thresholds.yaml
+GRADES = [(name, _T[f"grade_{name}"]["energy_meV_atom"], _T[f"grade_{name}"]["force_meV_A"])
+          for name in ("excellent", "good")]                 # E meV/atom, F meV/Å
+OVERFIT_RATIO = _T["overfit_ratio"]                         # final valid loss vs best valid loss
 PT_HEAD = "pt_head"      # the replay head of multihead fine-tuning
 
 

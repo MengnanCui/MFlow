@@ -46,3 +46,13 @@ def test_split_is_stratified(frames):
     train, test = split_frames(frames, 0.2, groups, seed=1)
     assert len(train) + len(test) == len(frames)
     assert {a.info["config_type"] for a in test} == {"Cu", "Al", "CuAl"}
+
+
+def test_force_breakdown_by_element(frames):
+    from mflow.calc import compare
+    for a in frames:
+        a.info["p_energy"] = a.info["REF_energy"] + 0.01 * len(a)
+        a.arrays["p_forces"] = a.arrays["REF_forces"] + np.where(a.numbers[:, None] == 29, 0.1, 0.0)
+    errors, _ = compare(frames, "p_", "REF_", "none")
+    by = errors["forces_by_element"]
+    assert abs(by["Cu"]["RMSE"] - 100.0) < 1e-6 and by["Al"]["RMSE"] < 1e-9

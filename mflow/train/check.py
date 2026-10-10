@@ -22,13 +22,15 @@ from ..data import composition, find_ref, fix_prefix, group_of, has_labels, keys
 from ..log import LOG, elapsed
 from ..report import Report
 from ..style import COLORS, plt
+from ..thresholds import section
 
 # thresholds — one place, so the json and the docs agree
-F_WARN, F_FAIL = 50.0, 200.0          # eV/Å, a single force component magnitude
-D_MIN = 0.6                           # Å, closest allowed pair distance
-E_OUTLIER_Z = 6.0                     # robust z-score (MAD) of the E0-fitted energy residual
-E0_OFFSET_WARN = 0.4                  # eV/atom raw zero-shot offset that hints at a DFT mismatch
-MIN_FRAMES, MIN_GROUP = 50, 10
+_T = section("check")                 # mflow/thresholds.yaml
+F_WARN, F_FAIL = _T["force_warn_eV_A"], _T["force_fail_eV_A"]   # a single force component magnitude
+D_MIN = _T["min_distance_A"]          # closest allowed pair distance
+E_OUTLIER_Z = _T["energy_outlier_mad"]  # robust z-score (MAD) of the E0-fitted energy residual
+E0_OFFSET_WARN = _T["e0_offset_warn_eV_atom"]   # zero-shot raw offset hinting at a DFT mismatch
+MIN_FRAMES, MIN_GROUP = _T["min_frames"], _T["min_group"]
 
 
 def stress_key(prefix: str) -> str:

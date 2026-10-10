@@ -151,7 +151,13 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("-device", default="auto", choices=["auto", "cpu", "cuda"], help="[auto]")
     train.add_argument("-cueq", default="auto", choices=["auto", "on", "off"],
                        help="cuEquivariance kernels [auto: on with cuda when installed]")
-    train.add_argument("-seed", type=int, default=123, help="[123]")
+    train.add_argument("-seed", type=int, default=123, help="[123]; committee members use seed, seed+1, ...")
+    train.add_argument("-committee", type=int, default=1, metavar="N",
+                       help="train N models with different seeds into <outdir>/m0..m{N-1} and measure how well "
+                            "their spread tracks the test error [1]")
+    train.add_argument("-bagging", type=float, default=None, metavar="FRAC",
+                       help="committee members train on different random subsets of this size "
+                            "[0.8 for fine-tuning, 1.0 for scratch]")
     train.add_argument("-set", nargs="*", default=None, metavar="KEY=VALUE",
                        help="extra mace_run_train options, checked against mace_run_train --help")
     train.add_argument("-dry", action="store_true", help="write config.yaml only, do not train")

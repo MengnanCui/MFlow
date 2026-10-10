@@ -25,6 +25,7 @@ from argparse import Namespace
 from pathlib import Path
 
 import ase.io
+import numpy as np
 from rich.progress import Progress
 
 from .. import __version__
@@ -141,6 +142,12 @@ def monitor(proc, watcher: Watcher, rep: Report, epochs: int) -> bool:
 
 
 def cmd_train(args) -> int:
+    if getattr(args, "committee", 1) > 1:
+        return train_committee(args)
+    return train_one(args)
+
+
+def train_one(args) -> int:
     t0 = time.perf_counter()
     run_dir = Path(args.outdir or args.name).resolve()
     device = pick_device(args.device)
@@ -270,3 +277,88 @@ def cmd_train(args) -> int:
     LOG(f"total [hi]{elapsed(time.perf_counter() - t0)}[/hi]")
     return 0 if not rep.failed else 2
 
+
+
+# ============================================================================ #
+#  committee: N members, same data and settings, different seeds
+# ============================================================================ #
+
+def train_committee(args) -> int:
+    """
+    <outdir>/m0 .. m{N-1}, seeds seed..seed+N-1, then the committee on the test set:
+    mean errors, force deviation and how well σ ranks the real errors (calibration).
+    Independence comes from the seed (initialisation of new parameters, shuffling, and the
+    validation split when it is drawn from the training file).
+    """
+    from copy import copy
+
+    base = Path(args.outdir or args.name).resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    bag = args.bagging if args.bagging is not None else (1.0 if args.mode == "scratch" else 0.8)
+    LOG.rule(f"MFlow {__version__} · committee of {args.committee}")
+    if bag < 1.0:
+        LOG(f"[dim]bagging: each member trains on a different random {bag:.0%} of the training set "
+            f"(fine-tuned members start from identical weights, so the seed alone gives a correlated committee)[/dim]")
+    frames = read_dataset(args.input, args.index) if bag < 1.0 else None
+    members, codes = [], []
+    for k in range(args.committee):
+        sub = copy(args)
+        sub.committee, sub.name, sub.seed = 1, f"{args.name}_m{k}", args.seed + k
+        sub.outdir = str(base / f"m{k}")
+        if frames is not None:
+            sub.input, sub.index = str(bagged(frames, bag, args.seed + k, base / f"m{k}_train.xyz")), ":"
+        LOG.rule(f"member {k + 1}/{args.committee} · seed {sub.seed}")
+        codes.append(train_one(sub))
+        model = Path(sub.outdir) / f"{sub.name}.model"
+        if model.exists():
+            members.append(str(model))
+
+    rep = Report("train-committee", run_dir=str(base))
+    rep.check("members", "pass" if len(members) == args.committee else "fail",
+              f"{len(members)}/{args.committee} models trained", value=members,
+              suggest="a committee member failed to train: see its <member>/<name>_train_report.json")
+    (base / "committee.json").write_text(json.dumps(
+        {"models": members, "seeds": [args.seed + k for k in range(args.committee)], "bagging": bag,
+         "mode": args.mode,
+         "foundation": None if args.mode == "scratch" else args.foundation}, indent=2), encoding="utf-8")
+    if len(members) >= 2 and args.test:
+        rep.data["test"] = evaluate_committee_on(members, args.test, args, base, rep)
+    elif not args.test:
+        rep.check("committee test", "warn", "no test set — calibration skipped",
+                  suggest="pass -test to measure whether the committee spread tracks the real error")
+    LOG.rule("verdict")
+    rep.show()
+    rep.write(base / f"{args.name}_committee_report.json")
+    return 0 if not rep.failed else 2
+
+
+def bagged(frames: list, fraction: float, seed: int, path: Path) -> Path:
+    """Random subset without replacement; isolated atoms (E0) always stay in."""
+    rng = np.random.default_rng(seed)
+    iso = [i for i, a in enumerate(frames) if is_isolated_atom(a)]
+    rest = [i for i in range(len(frames)) if i not in set(iso)]
+    keep = sorted(iso + rng.choice(rest, size=max(1, int(round(len(rest) * fraction))), replace=False).tolist())
+    ase.io.write(path, [frames[i] for i in keep], format="extxyz")
+    return path
+
+
+def evaluate_committee_on(models: list, test_file: str, args, outdir: Path, rep: Report) -> dict:
+    from ..calc import committee_calibration, compare, evaluate_committee, report_errors
+    from ..data import find_ref
+    from ..model import pick_device
+
+    LOG.rule("committee on the test set")
+    frames = read_dataset(test_file)
+    ref = find_ref(frames, exclude="com_")
+    frames = evaluate_committee(frames, models, pick_device(args.device), "float64", "com_", None)
+    errors, _ = compare(frames, "com_", ref, "none")
+    report_errors(errors, "com_", ref)
+    cal = committee_calibration(frames, "com_", ref, None if args.no_plot else str(outdir / "committee_calibration.png"))
+    rep.check("committee calibration", cal["verdict"], cal["verdict_message"], value=cal["spearman_atom"],
+              suggest="the committee spread does not rank real errors: more members, more diverse seeds/data, "
+                      "or select by diversity (FPS) instead of uncertainty")
+    fdev = np.array([a.info["com_Fdev_max"] for a in frames])
+    ase.io.write(outdir / "committee_test.xyz", frames, format="extxyz")
+    return {"errors": errors, "calibration": cal,
+            "Fdev_max_eV_A": {"median": float(np.median(fdev)), "q75": float(np.quantile(fdev, 0.75)),
+                              "iqr": float(np.quantile(fdev, 0.75) - np.quantile(fdev, 0.25))}}

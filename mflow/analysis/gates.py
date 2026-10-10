@@ -17,12 +17,14 @@ from __future__ import annotations
 import numpy as np
 
 from ..report import Report
+from ..thresholds import section
 
-DRIFT_PASS, DRIFT_WARN = 5e-4, 5e-3      # eV/atom/ps
-T_PASS, T_WARN = 0.05, 0.15
-T_CHANGE = 0.05                           # trend over the production window, fraction of target
-V_PASS, V_WARN = 0.02, 0.05
-D_MIN = 0.6                               # Å
+_T = section("md")                        # mflow/thresholds.yaml
+DRIFT_PASS, DRIFT_WARN = _T["nve_drift_pass_eV_atom_ps"], _T["nve_drift_warn_eV_atom_ps"]
+T_PASS, T_WARN = _T["temperature_pass"], _T["temperature_warn"]
+T_CHANGE = _T["temperature_trend"]        # trend over the production window, fraction of target
+V_PASS, V_WARN = _T["volume_pass"], _T["volume_warn"]
+D_MIN = _T["min_distance_A"]
 
 
 def production(x: np.ndarray, skip: float) -> slice:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mflow"
-version = "0.1.0"
+version = "0.2.0a1"
 description = "MACE toolkit: evaluation, relaxation, training and LAMMPS molecular dynamics"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,6 +27,9 @@ mflow = "mflow.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["mflow*"]
+
+[tool.setuptools.package-data]
+mflow = ["thresholds.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

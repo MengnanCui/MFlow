@@ -18,9 +18,10 @@ import ase.io
 from ase.data import atomic_numbers
 
 from .. import __version__
+from ..thresholds import section
 
 ENSEMBLES = ("nvt", "npt", "nve")
-HALT_FACTOR = 5.0          # stop when T exceeds this × the target (or the start T for nve)
+HALT_FACTOR = section("md")["halt_factor"]   # stop when T exceeds this × the target (thresholds.yaml)
 FS = 1e-3                  # fs -> ps
 
 

@@ -128,6 +128,7 @@ def evaluate_committee(frames: list, specs: list, device: str, dtype: str, prefi
             comm = np.asarray(calc.results["forces_comm"])                     # (models, atoms, 3)
             dev = np.sqrt(((comm - comm.mean(0)) ** 2).sum(-1).mean(0))
             atoms.arrays[f"{prefix}Fdev"] = dev
+            atoms.arrays[f"{prefix}Fstd"] = comm.std(0)                         # per component, for calibration
             atoms.info[f"{prefix}Fdev_max"] = float(dev.max())
             atoms.info[f"{prefix}Edev"] = float(np.std(calc.results["energy_comm"]) / len(atoms) * 1000)
             progress.advance(task)
@@ -198,7 +199,36 @@ def compare(frames: list, pred: str, ref: str, e0="fit") -> tuple[dict, dict]:
         sq = np.array([np.sum((a.arrays[fp] - a.arrays[fr]) ** 2) for a in frames])  # eV²/Å²
         series["dF"] = np.sqrt(sq / (3 * n)) * 1000                        # meV/Å, per structure
         series["sqF"] = sq
+        errors.update(force_breakdown(frames, fp, fr, series))
     return errors, series
+
+
+def force_breakdown(frames: list, fp: str, fr: str, series: dict) -> dict:
+    """
+    Per element force errors and the error as a function of the force magnitude: large-force
+    configurations dominate an RMSE, so |ΔF| vs |F| and a relative error show what it hides.
+    """
+    sym = np.concatenate([a.get_chemical_symbols() for a in frames])
+    d_atom = np.concatenate([np.linalg.norm(a.arrays[fp] - a.arrays[fr], axis=1) for a in frames])
+    f_atom = np.concatenate([np.linalg.norm(a.arrays[fr], axis=1) for a in frames])
+    dcomp = (series["f_pred"] - series["f_ref"]).reshape(-1, 3)
+    by_el = {}
+    for el in sorted(set(sym)):
+        m = sym == el
+        comp = dcomp[m].ravel() * 1000
+        by_el[el] = {"N_atoms": int(m.sum()), "MAE": float(np.abs(comp).mean()),
+                     "RMSE": float(np.sqrt((comp ** 2).mean()))}
+    big = f_atom > 0.1
+    edges = np.quantile(f_atom, [0, 0.25, 0.5, 0.75, 1.0]) if len(f_atom) > 3 else np.array([0, f_atom.max() + 1])
+    bins = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = (f_atom >= lo) & (f_atom <= hi)
+        if m.any():
+            bins.append({"F_lo": float(lo), "F_hi": float(hi), "N_atoms": int(m.sum()),
+                         "dF_RMSE_meV_A": float(np.sqrt((d_atom[m] ** 2).mean()) * 1000)})
+    series["f_atom"], series["dF_atom"], series["sym_atom"] = f_atom, d_atom, sym
+    return {"forces_by_element": by_el, "forces_by_magnitude": bins,
+            "forces_relative_median": float(np.median(d_atom[big] / f_atom[big])) if big.any() else float("nan")}
 
 
 def report_errors(errors: dict, pred: str, ref: str):
@@ -211,6 +241,15 @@ def report_errors(errors: dict, pred: str, ref: str):
               styles=["key", None, "hi", None, None, "dim", "dim"]))
     shifts = " · ".join(f"{el} {d:+.4f}" for el, d in errors["e0_shift_eV"].items())
     LOG(f"[dim]E0 alignment ({errors['e0_mode']}), eV per atom of element: {shifts}[/dim]")
+    if "forces_by_element" in errors:
+        by = errors["forces_by_element"]
+        LOG(table("force error by element", ["element", "atoms", "MAE", "RMSE", "unit"],
+                  [(el, f"{v['N_atoms']:,}", num(v["MAE"]), num(v["RMSE"]), "meV/Å") for el, v in by.items()],
+                  styles=["key", "dim", None, "hi", "dim"]))
+        mags = " · ".join(f"|F| {b['F_lo']:.2f}–{b['F_hi']:.2f}: {b['dF_RMSE_meV_A']:.0f}"
+                          for b in errors["forces_by_magnitude"])
+        LOG(f"[dim]|ΔF| RMSE (meV/Å) by |F_ref| quartile (eV/Å): {mags} · "
+            f"median relative error {errors['forces_relative_median'] * 100:.1f} % (|F| > 0.1 eV/Å)[/dim]")
 
 
 def report_prediction(frames: list, prefix: str) -> dict:
@@ -459,10 +498,57 @@ def cmd_calc(args) -> int:
         fdev = np.array([a.info[f"{prefix}Fdev_max"] for a in frames])
         metrics["committee"] = {"models": committee, "Fdev_max_eV_A": {
             "median": float(np.median(fdev)), "p95": float(np.quantile(fdev, 0.95)), "max": float(fdev.max())}}
+        if errors and "forces" in errors:
+            metrics["committee"]["calibration"] = committee_calibration(
+                frames, prefix, ref, None if args.no_plot else str(Path(args.outdir) / f"{stem}_calibration.png"))
     json_file = Path(args.outdir) / f"{stem}_metrics.json"
     json_file.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
     LOG(f"json [key]{json_file}[/key] · total [hi]{elapsed(time.perf_counter() - t0)}[/hi]")
     return 0
+
+
+def committee_calibration(frames: list, prefix: str, ref: str, outfile: str | None) -> dict:
+    """σ of the committee against the real error, on data that has reference forces."""
+    from .uq import calibration, verdict
+    fp, fr = keys(prefix)[1], keys(ref)[1]
+    delta = np.concatenate([(a.arrays[fp] - a.arrays[fr]).ravel() for a in frames])
+    sigma = np.concatenate([a.arrays[f"{prefix}Fstd"].ravel() for a in frames])
+    err_atom = np.concatenate([np.linalg.norm(a.arrays[fp] - a.arrays[fr], axis=1) for a in frames])
+    sig_atom = np.concatenate([a.arrays[f"{prefix}Fdev"] for a in frames])
+    cal = calibration(delta, sigma, err_atom, sig_atom)
+    status, message = verdict(cal)
+    cal["verdict"], cal["verdict_message"] = status, message
+    LOG(table("committee calibration (forces)", ["", "value", "ideal"],
+              [("Spearman σ vs |ΔF| (atoms)", f"{cal['spearman_atom']:.3f}", "1"),
+               ("miscalibration area", f"{cal['miscalibration_area']:.3f}", "0"),
+               ("RMS calibration error", f"{cal['rms_calibration_error']:.3f}", "0"),
+               ("RMS(ΔF) / RMS(σ)", f"{cal['sigma_ratio']:.2f}", "1  (>1 over-confident)"),
+               ("sharpness RMS(σ)", f"{cal['sharpness_eV_A'] * 1000:.1f} meV/Å", "small")],
+              styles=["key", "hi", "dim"]))
+    LOG(f"[{ {'pass': 'ok', 'warn': 'warn', 'fail': 'err'}[status] }]{message}[/] — "
+        "rank-based selection needs a positive Spearman; σ is an error bar only if the ratio is ≈ 1")
+    if outfile:
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+        ax = axes[0]
+        ax.scatter(sig_atom * 1000, err_atom * 1000, s=12, color=COLORS[0], alpha=0.5, edgecolors="none")
+        hi = max(sig_atom.max(), err_atom.max()) * 1000
+        ax.plot([0, hi], [0, hi], "k", ls=LINESTYLES[1], lw=1.5)
+        ax.set(xlabel=r"committee $\sigma_F$ per atom (meV/$\mathrm{\AA}$)",
+               ylabel=r"|$\Delta F$| per atom (meV/$\mathrm{\AA}$)", title=f"Spearman {cal['spearman_atom']:.2f}")
+        ax = axes[1]
+        ax.plot(cal["curve"]["expected"], cal["curve"]["observed"], color=COLORS[1])
+        ax.plot([0, 1], [0, 1], "k", ls=LINESTYLES[1], lw=1.5)
+        ax.fill_between(cal["curve"]["expected"], cal["curve"]["expected"], cal["curve"]["observed"],
+                        color=COLORS[1], alpha=0.2)
+        ax.set(xlabel="expected coverage", ylabel="observed coverage",
+               title=f"miscalibration area {cal['miscalibration_area']:.3f}")
+        for a in axes:
+            a.tick_params(which="both", direction="in")
+        fig.tight_layout()
+        fig.savefig(outfile)
+        plt.close(fig)
+        LOG(f"figure [key]{outfile}[/key]")
+    return cal
 
 
 def cmd_plot(args) -> int:

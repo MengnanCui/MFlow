@@ -27,12 +27,13 @@ from ..data import read_dataset
 from ..log import LOG, MONITOR, elapsed, progress_columns, table
 from ..model import pick_device, versions
 from ..report import Report
+from ..thresholds import section
 from . import env
 from .deploy import load_deploy
 from .inputs import MDParams, check_input, md_input, read_back, sanity, species_for, write_data
 
 # consistency tolerances by export precision: energy eV/atom, force eV/Å, pressure (abs bar, relative)
-TOL = {"float64": (1e-5, 1e-4, 1.0, 1e-4), "float32": (1e-3, 2e-2, 100.0, 1e-2)}
+TOL = {k: tuple(v) for k, v in section("consistency").items()}   # mflow/thresholds.yaml
 
 
 # ============================================================================ #
