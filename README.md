@@ -1,12 +1,37 @@
 # MFlow
 
-机器学习势工具箱（v0.7.0，Python 包 `mflow/`，命令 `mflow`）。功能：静态 MACE 计算、结构弛豫、按标签分类误差，运行时资源监控。
+机器学习势工具箱（v1.0.0，Python 包 `mflow/`，命令 `mflow`）。一条线走完 MACE 的 **数据体检 → 训练/微调 → 评估 → 导出 → LAMMPS 动力学 → 质量闸门**，
+每一步都输出机器可读的 `pass / warn / fail` 报告，可以直接交给 pi 之类的通用 agent 调用（见 [`skills/`](skills/)）。
+
+| 阶段 | 命令 | 报告 |
+|---|---|---|
+| 数据体检 | `mflow check` | `<stem>_check.json` |
+| 训练 / 微调 + 实时监控 | `mflow train` | `<run>/<run>_train_report.json` |
+| 训练分析 | `mflow train-report` | 同上 |
+| 推理 / 委员会 / 弛豫 | `mflow calc` · `mflow relax` · `mflow plot` | `<stem>_metrics.json` |
+| 导出到 LAMMPS（ML-IAP） | `mflow deploy` | `deploy/deploy.json` |
+| LAMMPS 环境检查 | `mflow lmp-check` | `lmp_check/lmp_env.json` |
+| LAMMPS MD（KOKKOS GPU） | `mflow md` | `<dir>/md_report.json` |
+| MD 分析与闸门 | `mflow md-report` | 同上 |
 
 计算过程中的**约定、默认和风险点**写在 [`docs/conventions.html`](docs/conventions.html) —— 尤其是能量对齐那一节，看数字之前先看它。
 
 ```bash
 # 先装和 CUDA 匹配的 torch，再在仓库根目录：
 pip install -e ".[mace]"        # 装好后命令行就有 mflow；也可以 python -m mflow ...
+pip install -e ".[gpu,test]"    # 可选：cuEquivariance、pynvml、pytest
+pytest                          # 22 个测试；有 mace-torch 会真训练 2 个 epoch，有 lmp 会真跑 LAMMPS
+```
+
+## 从数据到 MD：完整流程
+
+```bash
+mflow check -in dft.xyz -model mpa -split 0.1 -outdir check        # 体检 + 零样本 + 分层切分
+mflow train -in check/dft_train.xyz -test check/dft_test.xyz -name cu -dry   # 先看 config.yaml
+mflow train -in check/dft_train.xyz -test check/dft_test.xyz -name cu        # 训练 + 监控 + 报告
+mflow deploy -model cu/cu.model -outdir deploy                      # ML-IAP 导出（GPU 上）
+mflow lmp-check -deploy deploy                                      # LAMMPS 能不能跑它
+mflow md -in start.xyz -deploy deploy -temp 600 -steps 100000 -outdir md600   # MD + 闸门
 ```
 
 ## 用法
@@ -213,6 +238,78 @@ ASE 优化器逐结构串行，并行只能来自进程级：`multiprocessing` �
 python tools/izo_formation.py -in izo_mace.xyz -eZnO zno_mace.xyz -eIn2O3 in2o3_mace.xyz
 ```
 
+## 训练：check / train / train-report
+
+**`mflow check`** —— 训练前的体检。每一项都是 pass / warn / fail，加一句建议：
+
+| 检查 | 判据 |
+|---|---|
+| 标签 | 每帧都有能量和力；stress 要么全有要么全没有 |
+| 数值 | NaN/inf → fail；单个力分量 > 50 eV/Å warn，> 200 fail |
+| 几何 | 最近原子对 < 0.6 Å → fail；周期结构晶胞体积为 0 → fail |
+| 重复 | 几何指纹相同的帧（会在 train/valid/test 之间泄漏） |
+| 能量离群 | 逐元素线性拟合（剔除粗大离群后重拟合）的残差，> 6 MAD |
+| E0 | 是否每个元素都有 IsolatedAtom；没有就用 `--E0s estimated` |
+| 零样本（`-model`） | 基础模型是否覆盖所有元素、误差多大、原始能量偏移 > 0.4 eV/atom 提示 DFT 设置不一致 |
+| 规模 / 分组 | 总帧数、每个 `config_type` 的帧数 |
+
+`-split 0.1` 按分组分层切出测试集，IsolatedAtom 永远留在训练集。
+
+**`mflow train`** —— 同样的体检作为门槛（fail 就不训练，`-force` 跳过）→ 数据复制到 `<run>/data/` 并把标签统一成
+`REF_energy/REF_forces/REF_stress` → 按模式生成 `config.yaml` → 用 `mace_run_train --help` 校验每个键 → 运行并实时跟踪
+`results/*_train.txt`（NaN 立即停、验证 loss 连升 5 次告警、显存 > 90% 告警）→ 自动出报告。
+
+| `-mode` | lr | EMA | clip | 说明 |
+|---|---|---|---|---|
+| `finetune`（默认） | 1e-3 | 0.999 | 1.0 | 单一体系最好 |
+| `multihead` | 1e-4 | 0.9999 | 1.0 | 回放预训练数据（`-pt`，默认 `mp`），保泛化 |
+| `lora` | 1e-2 | 0.99 | 10 | 低秩适配 |
+| `scratch` | 1e-2 | 0.99 | 10 | 从头训练，最后 25% 进入 stage two |
+
+数值来自 MACE 官方微调指南；指南没给的（epoch、batch、stress 权重、r_max）用保守默认，通过
+`-set key=value` 覆盖（键名不合法会直接 fail）。`-foundation` 可以是 `mpa` / `omat` / `mh1` / `matpes` 或一个 `.model`。
+
+**`mflow train-report -dir <run>`** —— 学习曲线（标出最佳 epoch）、过拟合（最终 / 最佳验证 loss > 1.5）、
+训练前后验证误差改善倍数、测试集走和 `mflow calc` **完全相同**的误差定义（按组拆分、最差 5 个结构），
+并按 能量 < 5 / 10 meV/atom、力 < 20 / 50 meV/Å 分成 excellent / good / needs work。
+
+**委员会推理**：`mflow calc -model a.model,b.model,c.model` 写出平均能量/力，以及
+`<prefix>Fdev`（逐原子力偏差，DP-GEN 定义）、`<prefix>Fdev_max`、`<prefix>Edev` —— 主动学习选帧用。
+
+## LAMMPS 动力学：deploy / lmp-check / md / md-report
+
+MACE 通过 **ML-IAP unified + KOKKOS** 在 GPU 上跑，积分、恒温、恒压、dump、restart **全部由 LAMMPS 完成**。
+需要的 LAMMPS 编译选项（MACE 文档）：`PKG_KOKKOS + Kokkos_ENABLE_CUDA`、`PKG_ML-IAP`、`PKG_ML-SNAP`、`PKG_PYTHON`、
+`MLIAP_ENABLE_PYTHON`、`BUILD_SHARED_LIBS`；LAMMPS 内嵌的 Python 里要有 mace-torch、cuequivariance-torch、cupy。
+
+1. **`mflow deploy -model x.model [-head H] [-dtype float32|float64]`** —— 调 `mace_create_lammps_model --format mliap`
+   （要在跑 LAMMPS 的同型号 GPU 上做），写 `deploy.json`：源模型和导出文件的 sha256、head、**元素顺序**、r_max、精度、版本。
+   之后所有命令只认 `deploy.json`。多 head 模型必须指定 `-head`。
+2. **`mflow lmp-check [-lmp PATH] -deploy deploy`** —— 读 `lmp -h` 确认 KOKKOS(CUDA) / ML-IAP / PYTHON；在 LAMMPS 内嵌 Python
+   里 import mace / torch / cuequivariance / cupy 并确认能看到 GPU；用导出模型实跑一次 2 原子的 `run 0`。
+   lmp 的位置：`-lmp` > 环境变量 `MFLOW_LMP` > PATH。
+3. **`mflow md -in start.xyz -deploy deploy -ensemble nvt|npt|nve -temp T -steps N`**
+   - 输入来自一个固定模板（units metal，`velocity create`，`fix nvt/npt/nve`，`fix halt` 温度失控保护，unwrapped dump，
+     两个 restart 文件轮换，`run N upto`），参数检查：步长、阻尼、每卡原子数、晶胞是否小于 2·r_max。
+   - `lmp -sr` 先把真实输入完整解析、初始化一遍（不积分）。
+   - **一致性检查**：对起始结构 `run 0`，LAMMPS 的能量、逐原子力、压强必须和同一模型在 LAMMPS 外的计算一致
+     （fp64 导出：1e-5 eV/atom、1e-4 eV/Å；fp32：1e-3、2e-2）。元素顺序错位、单位、维里符号、导错 head 都会在这里被拦下。
+   - 正式运行时实时显示步数、温度、ns/day 和 GPU 占用；`-resume` 从最新 restart 接着跑（`-steps` 是总步数）。
+4. **`mflow md-report -dir md600`** —— 闸门 + 分析 + 一张 2×3 的图：
+
+| 闸门 | 判据 |
+|---|---|
+| LAMMPS ERROR / 丢原子 / fix halt | 出现即 fail |
+| Dangerous builds | > 0 warn |
+| NVE 能量漂移 | 生产段线性拟合斜率 < 5×10⁻⁴ eV/atom/ps pass，< 5×10⁻³ warn（LAMBench 标准） |
+| 温度（NVT/NPT） | 生产段均值与目标差 < 5 % pass，< 15 % warn；生产段线性趋势 < 5 % |
+| 体积（NPT） | 生产段体积变化 < 2 % pass，< 5 % warn |
+| 最近原子对 | 任何一帧 < 0.6 Å → fail |
+
+分析：热力学量均值/涨落、分元素 RDF（`-ref aimd.xyz` 时给出与参考的 RDF 差）、多时间原点 MSD 与扩散系数。
+`-skip` 是平衡段比例（默认 0.2），不参与闸门。
+
 ## Roadmap
 
-数据集工具（merge/split/delta/filter）· 训练与迁移学习封装 · 收敛曲线 · MD / 结构优化
+主动学习闭环（委员会对 LAMMPS dump 重新打分 → 信任窗口 + FPS 选帧 → VASP 标注 → `check` → 再训练）·
+VASP 标注（pymatgen 输入集 + custodian + dpdispatcher）· Optuna 调参 + 评分卡 · symmetrix 后端 · torch-sim 批量弛豫 · 声子/EOS 验证

@@ -49,7 +49,7 @@ def _lazy(module: str, name: str):
 def build_parser() -> argparse.ArgumentParser:
     """Options are multi-letter on purpose: -in, -out, -model ... no single-letter clashes."""
     parser = argparse.ArgumentParser(prog="mflow", epilog=EXAMPLES,
-                                     description=f"MFlow {__version__} — MACE energies and forces.",
+                                     description=f"MFlow {__version__} — MACE training, evaluation and LAMMPS MD.",
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-version", action="version", version=f"MFlow {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)

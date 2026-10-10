@@ -169,6 +169,8 @@
       <li><a href="#plot">绘图的取舍</a></li>
       <li><a href="#decisions">为跑通而做的决定</a></li>
       <li><a href="#risks">风险清单</a></li>
+      <li><a href="#train">训练（check / train）</a></li>
+      <li><a href="#lammps">LAMMPS 动力学</a></li>
     </ol>
   </nav>
 </header>
@@ -830,6 +832,68 @@ R²     = corrcoef(ref, pred)² </code></pre>
     </table>
   </div>
 </section>
+
+<section id="train">
+  <h2><span class="num">13</span>训练（check / train）</h2>
+  <p class="sub">MFlow 替你做的决定，和它们的依据</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>决定</th><th>取值</th><th>依据 / 可改吗</th></tr></thead>
+      <tbody>
+        <tr><td>标签统一</td><td class="mono">REF_energy / REF_forces / REF_stress</td><td>训练前把探测到的前缀复制成这三个键，写到 <span class="mono">&lt;run&gt;/data/</span>；原文件不动</td></tr>
+        <tr><td>E0</td><td class="mono">isolated → estimated → average</td><td>每个元素都有 IsolatedAtom 就用它们；否则微调用 <span class="mono">estimated</span>（基础模型最小二乘），从头训练用 <span class="mono">average</span></td></tr>
+        <tr><td>微调超参</td><td class="mono">lr / ema_decay / clip_grad</td><td>MACE 官方微调指南的推荐值；<span class="mono">-set</span> 可覆盖，键名用 <span class="mono">mace_run_train --help</span> 校验</td></tr>
+        <tr><td>能量 / 力权重</td><td class="mono">1 / 10（微调）</td><td>微调期间保持不变（权重切换会破坏微调稳定性），所以只有 scratch 开 stage two</td></tr>
+        <tr><td>精度</td><td class="mono">float32 + cuEquivariance</td><td>训练默认；评估/弛豫用 float64</td></tr>
+        <tr><td>测试集误差</td><td class="mono">E0 none</td><td>测试集和训练集是同一套 DFT，E0 已在模型里，不再拟合</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="call risk">
+    <span class="tag">risk · 中</span>
+    <p>体检里的能量离群是<strong>相对逐元素线性拟合</strong>的残差：强应变、表面、团簇本来就离得远，
+    它们被标成离群不一定是坏数据 —— 先看 <span class="mono">config_type</span> 再决定删不删。</p>
+  </div>
+</section>
+
+<section id="lammps">
+  <h2><span class="num">14</span>LAMMPS 动力学</h2>
+  <p class="sub">单位、元素顺序、维里约定，以及一致性检查为什么必不可少</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>量</th><th>LAMMPS（units metal）</th><th>MFlow 选项</th></tr></thead>
+      <tbody>
+        <tr><td>时间步 / 阻尼</td><td class="mono">ps</td><td><span class="mono">-dt -tdamp -pdamp</span> 用 fs，写输入时 ×10⁻³</td></tr>
+        <tr><td>压强</td><td class="mono">bar</td><td><span class="mono">-press</span> 用 bar</td></tr>
+        <tr><td>能量 / 力</td><td class="mono">eV · eV/Å</td><td>同 MACE</td></tr>
+        <tr><td>原子类型</td><td class="mono">1..n</td><td>结构里出现的元素按原子序数排序；data 文件、<span class="mono">pair_coeff</span>、<span class="mono">dump_modify element</span> 用同一列表</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>LAMMPS 会把晶胞转成下三角形式，原子坐标和力随之旋转。一致性检查读回 LAMMPS 写出的 data 文件，
+  在<strong>同一坐标系</strong>里用源模型（ASE 计算器）重算，再与 <span class="mono">run 0</span> 的能量、逐原子力、压强比较。
+  压强的参考值是 <span class="mono">P = −tr(σ)/3</span>，σ 为 ASE 应力（eV/Å³），再换成 bar；
+  <span class="mono">run 0</span> 时没有速度，LAMMPS 的压强只含维里项，两者可以直接比较。</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>导出精度</th><th>能量</th><th>力</th><th>压强</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">float64</td><td class="mono">1e-5 eV/atom</td><td class="mono">1e-4 eV/Å</td><td class="mono">max(1 bar, 1e-4·|P|)</td></tr>
+        <tr><td class="mono">float32</td><td class="mono">1e-3 eV/atom</td><td class="mono">2e-2 eV/Å</td><td class="mono">max(100 bar, 1e-2·|P|)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="call risk">
+    <span class="tag">risk · 高</span>
+    <p>不要用 <span class="mono">-nocheck</span> / <span class="mono">-force</span> 绕过失败的一致性检查。
+    它失败只有几种原因：元素顺序错位、导出了错误的 head、导出环境与 LAMMPS 内嵌 Python 的 mace/cuequivariance 版本不一致、
+    单位或维里约定错误 —— 每一种都会让整段 MD 静默出错。</p>
+  </div>
+  <p>闸门阈值：NVE 漂移 &lt; 5×10⁻⁴ eV/atom/ps（LAMBench），温度均值偏差 &lt; 5 %，NPT 体积变化 &lt; 2 %，
+  最近原子对 &gt; 0.6 Å。平衡段（<span class="mono">-skip</span>，默认 20 %）不参与闸门。
+  力误差低并不保证 MD 稳定（Fu et al., arXiv 2210.07237），所以闸门对每条轨迹都跑。</p>
+</section>
+
 
 <footer>
   MFlow v0.6.0 · docs/conventions.html · MengnanCui/MFlow

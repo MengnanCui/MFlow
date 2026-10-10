@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-MFlow — MACE toolkit: evaluation, relaxation, training and LAMMPS molecular dynamics.
+MFlow — MACE toolkit: dataset checks, training, evaluation, LAMMPS molecular dynamics.
 
-    mflow calc  : evaluate an xyz dataset with MACE -> energies & forces
-    mflow relax : optimise every structure with an ASE optimiser
-    mflow plot  : re-analyse / re-plot an already evaluated file
+    mflow check / train / train-report          dataset health, mace_run_train + live monitoring, analysis
+    mflow calc / relax / plot                   evaluation (incl. committees), ASE relaxation, re-plotting
+    mflow deploy / lmp-check / md / md-report   ML-IAP export, LAMMPS probe, KOKKOS MD, quality gates
 
-Writes  <stem>_mace.xyz / <stem>_relax.xyz (labels <prefix>energy, <prefix>forces, ...),
-        a summary png, a metrics json and py.log.
+Every command writes a json report with status pass | warn | fail (see mflow.report).
 """
 
-__version__ = "0.9.0"
+__version__ = "1.0.0"
 
 # the names tools/ and older scripts import from `mflow`
 from .data import (REF_CANDIDATES, composition, energies, find_ref, fix_prefix, forces,  # noqa: E402,F401
