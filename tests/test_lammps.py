@@ -52,7 +52,8 @@ def md_args(tmp_path, deploy, lmp, **kw):
     base = dict(input=str(tmp_path / "start.xyz"), index="-1", deploy=str(deploy), ensemble="nvt", temp=300.0,
                 temp_end=None, press=1.0, dt=1.0, steps=600, tdamp=None, pdamp=None, seed=1, dump=50,
                 thermo=20, restart=300, ngpu=1, lmp=lmp, outdir=str(tmp_path / "md"), skip=0.2,
-                nocheck=False, dry=False, resume=False, force=False, no_plot=True)
+                nocheck=False, dry=False, resume=False, force=False, no_plot=True, protocol="single",
+                thermostat="nh", baro="iso", melt_temp=None, fmax=0.01)
     base.update(kw)
     return Namespace(**base)
 
@@ -83,3 +84,75 @@ def test_md_blow_up_is_caught(tmp_path, lmp_exe):
     assert code == 2
     report = json.loads((tmp_path / "md" / "md_report.json").read_text())
     assert report["status"] == "fail"
+
+
+def test_thermostat_barostat_and_protocol_inputs():
+    from mflow.lmp.inputs import stages
+    kw = dict(temp=500, press=10, dt=2, steps=1000, species=["Cu"], pair_style="lj/cut 6.0")
+    text = md_input(MDParams(ensemble="npt", thermostat="csvr", baro="aniso", **kw))
+    assert "fix             md all nph aniso 10 10 2" in text and "temp/csvr 500 500 0.2" in text
+    text = md_input(MDParams(ensemble="nvt", thermostat="langevin", **kw))
+    assert "fix             md all nve" in text and "langevin 500 500 0.2" in text and "zero yes" in text
+    p = MDParams(protocol="transport", **kw)
+    st = stages(p)
+    assert [s.ensemble for s in st] == ["npt", "nvt", "nve"] and st[-1].end == 1000
+    text = md_input(p)
+    assert "change_box      all x scale ${s} y scale ${s} z scale ${s} remap" in text
+    assert text.count("run             ") == 3
+    resumed = md_input(p, resume_from="restart.a", resume_step=400)  # inside nvt: npt stage dropped
+    assert "change_box" not in resumed and "run             300 upto" not in resumed
+    assert "run             1000 upto" in resumed
+    text = md_input(MDParams(protocol="minimize", baro="tri", **kw))
+    assert "suffix          off" in text and "box/relax tri 10" in text and "jump            SELF relax_loop" in text
+    q = stages(MDParams(protocol="quench", temp=1500, temp_end=300, steps=1000))
+    assert (q[-1].temp, q[-1].temp_end) == (1500, 300)
+
+
+def test_protocols_run_in_lammps(tmp_path, lmp_exe):
+    """transport (npt → average volume → nvt → nve), minimize (box/relax loop) and melt, with LJ copper."""
+    a = bulk("Cu", "fcc", a=3.61, cubic=True).repeat((3, 3, 3))
+    a.rattle(0.02, seed=3)
+    ase.io.write(tmp_path / "start.xyz", a)
+    deploy = lj_deploy(tmp_path)
+
+    out = tmp_path / "transport"
+    cmd_md(md_args(tmp_path, deploy, lmp_exe, protocol="transport", thermostat="csvr", steps=1500, dump=10,
+                   outdir=str(out)))
+    rep = json.loads((out / "md_report.json").read_text())
+    names = {c["name"] for c in rep["checks"]}
+    assert rep["production_stage"] == "nve" and "NVE energy drift" in names
+    assert "MFLOW volume -> average" in (out / "log.lammps").read_text()
+    assert rep["block_averages"]["Temp"]["se"] > 0
+
+    out = tmp_path / "relax"
+    assert cmd_md(md_args(tmp_path, deploy, lmp_exe, protocol="minimize", baro="iso", press=0.0, steps=2000,
+                          fmax=1e-4, outdir=str(out))) == 0
+    rep = json.loads((out / "md_report.json").read_text())
+    relaxed = ase.io.read(out / "relaxed.xyz")
+    assert rep["fmax_eV_A"] < 2e-4 and abs(rep["press_bar"]) < 500
+    assert relaxed.get_volume() != pytest.approx(a.get_volume(), rel=1e-4)    # LJ a0 differs from 3.61 Å
+
+
+
+def test_melt_protocol_with_eam(tmp_path, lmp_exe):
+    """Coexistence mechanics with a Sutton–Chen Cu EAM: groups, frozen half, q6 slab profile, verdict."""
+    from conftest import sutton_chen_cu
+    pot = sutton_chen_cu(tmp_path / "Cu_SC.eam.alloy")
+    d = tmp_path / "deploy"
+    d.mkdir()
+    (d / "deploy.json").write_text(json.dumps({
+        "elements": ["Cu"], "r_max": 7.0, "dtype": "float64", "kokkos": False, "exported": "eam",
+        "pair_style": "eam/alloy", "pair_coeff": f"* * {pot} {{species}}",
+        "reference": {"type": "eam", "file": str(pot), "dtype": "float64"}}))
+    ase.io.write(tmp_path / "start.xyz", bulk("Cu", "fcc", a=3.61, cubic=True).repeat((3, 3, 8)))
+    out = tmp_path / "melt"
+    cmd_md(md_args(tmp_path, d, lmp_exe, protocol="melt", temp=950, melt_temp=2000, steps=8000,
+                   outdir=str(out)))                                   # this EAM melts at ~950 K
+    rep = json.loads((out / "md_report.json").read_text())
+    checks = {c["name"]: c for c in rep["checks"]}
+    assert checks["consistency: energy"]["status"] == "pass"
+    assert rep["production_stage"] == "coexistence" and "melt: phases" in checks
+    assert (out / "phase_profile.dat").exists()
+    assert rep["bonds_crystal_start"] > 6 > 3 > rep["bonds_liquid_start"]      # one crystal, one liquid half
+    log = (out / "log.lammps").read_text()
+    assert "atoms in group liquid" in log and "fix             freeze solid setforce" in log

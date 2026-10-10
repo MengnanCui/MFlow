@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import asdict
 import time
 from pathlib import Path
 
@@ -30,7 +31,8 @@ from ..report import Report
 from ..thresholds import section
 from . import env
 from .deploy import load_deploy
-from .inputs import MDParams, check_input, md_input, read_back, sanity, species_for, write_data
+from .inputs import (MDParams, check_input, first_shell, is_orthogonal, md_input, read_back, sanity, species_for, stages,
+                     write_data)
 
 # consistency tolerances by export precision: energy eV/atom, force eV/Å, pressure (abs bar, relative)
 TOL = {k: tuple(v) for k, v in section("consistency").items()}   # mflow/thresholds.yaml
@@ -49,6 +51,9 @@ def reference_calculator(ref: dict, device: str):
     if kind == "lj":                      # used by the test-suite with pair_style lj/cut + shift
         from ase.calculators.lj import LennardJones
         return LennardJones(epsilon=ref["epsilon"], sigma=ref["sigma"], rc=ref["rc"], smooth=False)
+    if kind == "eam":                     # used by the test-suite with pair_style eam/alloy
+        from ase.calculators.eam import EAM
+        return EAM(potential=ref["file"], form="alloy")
     raise ValueError(f"unknown reference type {kind!r}")
 
 
@@ -146,7 +151,18 @@ def follow(proc, log_file: Path, total_steps: int, start_step: int = 0, dt_fs: f
 def skiprun_input(p: MDParams) -> str:
     """The production input with its own log/dump and no restart files — -sr must leave no trace."""
     text = md_input(p, log_file="skiprun.log").replace("traj.lammpstrj", "skiprun.lammpstrj")
-    return "\n".join(l for l in text.splitlines() if not l.startswith(("restart ", "write_restart"))) + "\n"
+    for name in ("phase_profile.dat", "relaxed.data", "relaxed.dump"):
+        text = text.replace(name, "skiprun_" + name)
+    # nothing is integrated under -sr, so the averaged volume does not exist: keep the box as it is
+    skip = ("restart ", "write_restart", "change_box", "print ")
+    return "\n".join(l for l in text.splitlines() if not l.startswith(skip)) + "\n"
+
+
+def restart_step(restart: Path, last_logged: int, every: int) -> int:
+    """restart.a/b are written at multiples of `every`; final.restart at the last logged step."""
+    if restart.name == "final.restart":
+        return last_logged
+    return (last_logged // max(every, 1)) * max(every, 1)
 
 
 def newest_restart(run_dir: Path) -> Path | None:
@@ -184,10 +200,16 @@ def cmd_md(args) -> int:
                  dt=args.dt, steps=args.steps, tdamp=args.tdamp, pdamp=args.pdamp, seed=args.seed,
                  dump=args.dump, thermo=args.thermo, restart=args.restart, species=species,
                  pair_style=deploy["pair_style"], pair_coeff=deploy.get("pair_coeff", "* * {species}"),
-                 pair_extra=deploy.get("pair_extra", []), periodic=tuple(bool(x) for x in atoms.pbc))
+                 pair_extra=deploy.get("pair_extra", []), periodic=tuple(bool(x) for x in atoms.pbc),
+                 thermostat=getattr(args, "thermostat", "nh"), baro=getattr(args, "baro", "iso"),
+                 protocol=getattr(args, "protocol", "single"), melt_temp=getattr(args, "melt_temp", None),
+                 fmax=getattr(args, "fmax", 0.01), triclinic=not is_orthogonal(atoms),
+                 shell_cutoff=first_shell(atoms) if getattr(args, "protocol", "single") == "melt" else None)
     kokkos = bool(deploy.get("kokkos", True))
     LOG.kv({"structure": f"{args.input} [{args.index}]", "atoms": len(atoms), "species (types)": " ".join(species),
-            "ensemble": p.ensemble, "T": f"{p.temp:g}→{p.temp_end:g} K", "P": f"{p.press:g} bar" if p.ensemble == "npt" else "—",
+            "protocol": p.protocol if p.protocol != "single" else "—",
+            "ensemble": p.ensemble if p.protocol in ("single", "anneal", "quench") else "per stage",
+            "thermostat / barostat": f"{p.thermostat} / {p.baro}", "T": f"{p.temp:g}→{p.temp_end:g} K", "P": f"{p.press:g} bar" if p.ensemble == "npt" else "—",
             "dt": f"{p.dt:g} fs", "steps": f"{p.steps:,} ({p.steps * p.dt / 1000:g} ps)",
             "model": Path(deploy.get("exported", deploy["pair_style"])).name, "head": deploy.get("head") or "—",
             "precision": deploy.get("dtype", "?"), "GPUs": args.ngpu, "run dir": str(run_dir)})
@@ -199,14 +221,24 @@ def cmd_md(args) -> int:
     if args.resume and not resume:
         rep.check("resume", "fail", f"no restart file in {run_dir}")
         return _finish(rep, run_dir)
+    if resume and p.protocol == "minimize":
+        rep.check("resume", "fail", "minimize cannot resume: rerun it (it is cheap) without -resume")
+        return _finish(rep, run_dir)
+    start = 0
+    if resume:
+        from ..analysis.thermo import merged, parse_log
+        th = merged(parse_log(run_dir / "log.lammps")) if (run_dir / "log.lammps").exists() else {}
+        start = restart_step(resume, int(th["Step"][-1]) if th else 0, p.restart)
     if not resume:
-        write_data(atoms, run_dir / "data.lmp", species)
+        write_data(atoms, run_dir / "data.lmp", species, p.triclinic)
         (run_dir / "log.lammps").unlink(missing_ok=True)
     infile = "in.resume" if resume else "in.lammps"
-    (run_dir / infile).write_text(md_input(p, resume_from=resume.name if resume else None), encoding="utf-8")
+    (run_dir / infile).write_text(md_input(p, resume_from=resume.name if resume else None,
+                                           resume_step=start if resume else None), encoding="utf-8")
     (run_dir / "in.check").write_text(check_input(p), encoding="utf-8")
     (run_dir / "in.skiprun").write_text(skiprun_input(p), encoding="utf-8")
-    meta = {"mflow": __version__, "params": p.to_dict(), "natoms": len(atoms), "input": str(Path(args.input).resolve()),
+    meta = {"mflow": __version__, "params": p.to_dict(), "natoms": len(atoms),
+            "stages": [asdict(st) for st in stages(p)], "input": str(Path(args.input).resolve()),
             "index": args.index, "deploy": deploy["_path"], "kokkos": kokkos, "ngpu": args.ngpu}
     (run_dir / "md.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     LOG(f"inputs in [key]{run_dir}[/key]: data.lmp · {infile} · in.check")
@@ -260,11 +292,6 @@ def cmd_md(args) -> int:
     LOG.rule("lammps")
     cmd = env.command(exe, infile, args.ngpu, kokkos)
     LOG(f"[dim]{' '.join(cmd)}[/dim]")
-    start = 0
-    if resume:
-        from ..analysis.thermo import merged, parse_log
-        th = merged(parse_log(run_dir / "log.lammps")) if (run_dir / "log.lammps").exists() else {}
-        start = int(th["Step"][-1]) if th else 0
     t_run = time.perf_counter()
     with open(run_dir / "lammps.out", "a", encoding="utf-8") as out:
         proc = subprocess.Popen(cmd, cwd=run_dir, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)

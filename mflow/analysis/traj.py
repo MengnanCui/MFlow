@@ -119,3 +119,92 @@ def rdf_difference(a: dict, b: dict) -> dict:
 
 
 _trapz = getattr(np, "trapezoid", None) or np.trapz      # numpy < 2.0 has only trapz
+
+
+def dump_steps(path: str | Path) -> np.ndarray:
+    """Timestep of every snapshot in a LAMMPS text dump (the line after ITEM: TIMESTEP)."""
+    steps, grab = [], False
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if grab:
+                steps.append(int(line.split()[0]))
+                grab = False
+            elif line.startswith("ITEM: TIMESTEP"):
+                grab = True
+    return np.array(steps, int)
+
+
+def select_steps(frames: list, steps: np.ndarray, lo: int, hi: int | None = None) -> list:
+    """Frames with lo <= step <= hi, one per step (a resumed or multi-stage run can repeat a step)."""
+    out, seen = [], set()
+    for a, s in zip(frames, steps):
+        if s >= lo and (hi is None or s <= hi) and s not in seen:
+            seen.add(int(s))
+            out.append(a)
+    return out
+
+
+def msd_loglog_slope(msd_curve: dict, fit_from: float = 0.2) -> dict:
+    """d log MSD / d log t over the fit window: 1 when diffusive, ~0 for a solid, 2 when ballistic."""
+    t = msd_curve.get("t_ps")
+    if t is None or len(t) < 5:
+        return {}
+    k = max(int(len(t) * fit_from), 1)
+    out = {}
+    for el, y in msd_curve.items():
+        if el == "t_ps" or np.any(y[k:] <= 0):
+            continue
+        out[el] = float(np.polyfit(np.log(t[k:]), np.log(y[k:]), 1)[0])
+    return out
+
+
+def diffusion_axes(frames: list, dt_ps: float, fit_from: float = 0.2, origins: int = 10) -> dict:
+    """D_xx, D_yy, D_zz per element (cm²/s): MSD slope per axis / 2. Should agree in an isotropic liquid."""
+    pos = np.array([a.get_positions() for a in frames])
+    sym = np.array(frames[0].get_chemical_symbols())
+    T = len(frames)
+    max_lag = T // 2
+    if max_lag < 5:
+        return {}
+    starts = np.unique(np.linspace(0, T - max_lag - 1, min(origins, T - max_lag)).astype(int))
+    t = np.arange(max_lag) * dt_ps
+    k = int(max_lag * fit_from)
+    out = {}
+    for el in sorted(set(sym)):
+        m = sym == el
+        acc = np.zeros((max_lag, 3))
+        for s in starts:
+            acc += ((pos[s:s + max_lag, m] - pos[s, m]) ** 2).mean(1)
+        acc /= len(starts)
+        out[el] = [float(np.polyfit(t[k:], acc[k:, i], 1)[0] / 2 * 1e-4) for i in range(3)]
+    return out
+
+
+def yeh_hummer(D_cm2_s: float, T: float, L_A: float, viscosity_mPa_s: float) -> float:
+    """Finite-size correction for a cubic box (Yeh & Hummer, JPCB 108, 15873, 2004): D∞ = D(L) + ξ kT / (6π η L)."""
+    xi, kB = 2.837297, 1.380649e-23
+    return D_cm2_s + xi * kB * T / (6 * np.pi * viscosity_mPa_s * 1e-3 * L_A * 1e-10) * 1e4
+
+
+def vdos(frames: list, dt_ps: float) -> dict | None:
+    """
+    Vibrational density of states from the mass-weighted velocity autocorrelation (all time origins,
+    by FFT), one-sided Hann window cos²(πt / 2t_max), normalised to unit area. Frequencies in THz.
+    """
+    vel = np.array([a.get_velocities() for a in frames])          # (T, N, 3), any unit (normalised away)
+    if len(vel) < 16 or not np.any(vel):
+        return None
+    m = frames[0].get_masses()
+    T = len(vel)
+    v = vel.reshape(T, -1)
+    w = np.repeat(m, 3)
+    f = np.fft.rfft(v, n=2 * T, axis=0)
+    acf = np.fft.irfft(np.abs(f) ** 2, axis=0)[:T] / (T - np.arange(T))[:, None]
+    c = (acf * w).sum(1)
+    c /= c[0]
+    t = np.arange(T)
+    c *= np.cos(np.pi * t / (2 * (T - 1))) ** 2
+    spec = np.abs(np.fft.rfft(np.concatenate([c, c[-2:0:-1]])).real)
+    nu = np.fft.rfftfreq(2 * T - 2, d=dt_ps)                      # 1/ps = THz
+    spec /= _trapz(spec, nu)
+    return {"nu_THz": nu, "g": spec, "nyquist_THz": float(0.5 / dt_ps)}

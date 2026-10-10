@@ -117,3 +117,20 @@ def gate_geometry(dmin: np.ndarray, rep: Report):
               suggest="atoms collapsed onto each other: the potential has a hole there — add such "
                       "configurations to training (active learning)")
     return {"dmin_min": float(dmin.min()), "dmin_first_bad_frame": int(bad[0]) if len(bad) else None}
+
+
+def gate_halves(th: dict, sl: slice, ensemble: str, rep: Report, out: dict):
+    """First vs second half of the production window, in units of their combined block error."""
+    from .stats import halves
+    cols = ["Temp", "PotEng"] + (["Volume"] if ensemble in ("npt", "nph") else [])
+    res = {c: halves(th[c][sl]) for c in cols if c in th}
+    res = {c: r for c, r in res.items() if r}
+    if not res:
+        return
+    out["halves"] = res
+    worst = max(res, key=lambda c: res[c]["z"])
+    z = res[worst]["z"]
+    rep.check("equilibrated (half vs half)", "pass" if z < 3 else "warn",
+              " · ".join(f"{c} {r['first']:.4g}→{r['second']:.4g} ({r['z']:.1f}σ)" for c, r in res.items()),
+              value=z, suggest="the two halves of the production window differ by more than 3 block errors: "
+                               "the run is still equilibrating — extend it or skip more (-skip)")

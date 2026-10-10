@@ -36,6 +36,9 @@ EXAMPLES = """examples
   mflow md -in start.xyz -deploy deploy -temp 600 -steps 50000 -outdir md600
   mflow md -in start.xyz -deploy deploy -ensemble npt -press 1 -outdir npt -dry
   mflow md-report -dir md600                        # gates, RDF, MSD, figure
+  mflow md -in liq.xyz -deploy deploy -protocol transport -temp 900 -steps 200000 -outdir d900
+  mflow md -in cu.xyz -deploy deploy -protocol minimize -baro aniso -outdir relax
+  mflow md -in slab_z.xyz -deploy deploy -protocol melt -temp 1350 -melt_temp 2000 -outdir tm
 
   mflow validate dimer -model cu.model -elements Cu  # short-range wall, smoothness
   mflow validate eos -model cu.model -in cu.xyz -ref "V0=11.8,B0=140"
@@ -211,6 +214,15 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("-index", default="-1", help="which structure of the file [-1]")
     md.add_argument("-deploy", required=True, metavar="DIR|JSON", help="written by `mflow deploy`")
     md.add_argument("-ensemble", default="nvt", choices=["nvt", "npt", "nve"], help="[nvt]")
+    md.add_argument("-protocol", default="single",
+                    choices=["single", "equilibrate", "transport", "anneal", "quench", "minimize", "melt"],
+                    help="multi-stage recipes, see `mflow md -h` epilog and skills/mflow-md [single]")
+    md.add_argument("-thermostat", default="nh", choices=["nh", "csvr", "langevin"],
+                    help="Nosé–Hoover chain | Bussi stochastic velocity rescaling | Langevin [nh]")
+    md.add_argument("-baro", default="iso", choices=["iso", "aniso", "tri"],
+                    help="iso: cubic / liquids; aniso: orthogonal, non-cubic; tri: full cell (triclinic) [iso]")
+    md.add_argument("-melt_temp", type=float, default=None, help="melt: K for the molten half, above T_m and below boiling [1.5 × -temp]")
+    md.add_argument("-fmax", type=float, default=0.01, help="minimize: eV/Å, max force component [0.01]")
     md.add_argument("-temp", type=float, default=300.0, help="K; start temperature for nve [300]")
     md.add_argument("-temp_end", type=float, default=None, help="K, linear ramp to this [= -temp]")
     md.add_argument("-press", type=float, default=1.0, help="bar, npt only [1]")
@@ -236,7 +248,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     mdrep = sub.add_parser("md-report", help="quality gates, thermodynamics, RDF and MSD of an MD run")
     mdrep.add_argument("-dir", required=True, help="run directory (mflow md, or any dir with log.lammps)")
-    mdrep.add_argument("-ensemble", default=None, choices=["nvt", "npt", "nve"], help="[from md.json]")
+    mdrep.add_argument("-ensemble", default=None, choices=["nvt", "npt", "nve", "nph"], help="[from md.json]")
+    mdrep.add_argument("-viscosity", type=float, default=None,
+                       help="mPa·s of the same model: adds the Yeh–Hummer finite-size correction to D (cubic box)")
     mdrep.add_argument("-temp", type=float, default=None, help="target K [from md.json]")
     mdrep.add_argument("-skip", type=float, default=0.2, help="equilibration fraction [0.2]")
     mdrep.add_argument("-stride", type=int, default=1, help="read every N-th dump frame [1]")
