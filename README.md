@@ -1,7 +1,7 @@
 # MFlow
 
 **MACE 势函数的一条龙工具：训练 → 评估 → 推理 → LAMMPS 动力学 → 质量判定。**
-当前版本 **v0.1**（Python 包 `mflow/`，命令 `mflow`）；下一版的规划见 [v0.2 路线图](docs/roadmap-v0.2.md)。
+当前版本 **v0.2.0a1**（Python 包 `mflow/`，命令 `mflow`）：v0.1 的训练/推理/MD 之上，加了委员会训练与不确定度校准、主动学习闭环（接 TFlow）、`validate` 静态性质、LAMMPS 协议库。设计与依据见 [v0.2 路线图](docs/roadmap-v0.2.md)。
 
 两条设计原则：
 
@@ -19,9 +19,10 @@
 - [一、训练](#一训练)：数据与标签 · 体检 · 选方案 · 训练与监控 · **精度怎么看** · 评估方案
 - [二、推理](#二推理)：标签 · 精度 · 不确定度（委员会）· 弛豫
 - [三、LAMMPS 动力学](#三lammps-动力学)：导出 · 环境检查 · **输入如何生成** · **系综怎么选** · 质量闸门 · 可参考的 skill
-- [四、给 agent 用：skills](#四给-agent-用skills)
-- [五、输出文件与约定](#五输出文件与约定)
-- [六、版本](#六版本)
+- [四、主动学习：`mflow al`](#四主动学习mflow-al)：探索 → 筛选 → TFlow 标注 → 收回 → 委员会再训练 → 何时停
+- [五、给 agent 用：skills](#五给-agent-用skills)
+- [六、输出文件与约定](#六输出文件与约定)
+- [七、版本](#七版本)
 
 ---
 
@@ -31,7 +32,8 @@
 # 1) 先装与 CUDA 匹配的 torch，再在仓库根目录：
 pip install -e ".[mace]"          # 得到命令 mflow（也可以 python -m mflow ...）
 pip install -e ".[gpu,test]"      # 可选：cuequivariance-torch、nvidia-ml-py（GPU 监控）、pytest
-pytest                            # 22 个测试：装了 mace-torch 会真训练 2 个 epoch，PATH 里有 lmp 会真跑 LAMMPS
+pip install -e ".[validate]"      # 可选：phonopy + seekpath（mflow validate phonon）
+pytest                            # 42 个测试：装了 mace-torch 会真训练，PATH 里有 lmp 会真跑 LAMMPS（LJ / EAM）
 ```
 
 - **LAMMPS** 需要另外从源码编译，打开 KOKKOS(CUDA)、ML-IAP、ML-SNAP、PYTHON、`MLIAP_ENABLE_PYTHON`，见 [3.1](#31-导出与环境检查)。
@@ -178,12 +180,31 @@ run 目录可以完整复现：`config.yaml`、`data/`、`mace_train.out`，以�
 
 验证类文献（Morrow, Gardner & Deringer, *J. Chem. Phys.* 158, 121501 (2023)；LAMBench；MLIP Arena）里的检查可以归成四层。MFlow 目前的覆盖情况：
 
-| 层 | 内容 | v0.1 | v0.2 计划 |
-|---|---|---|---|
-| **0 误差** | 测试集 E/F 的 RMSE、MAE；按组拆分；最差结构 | ✅ `train-report` / `calc -group` | 力误差按元素拆分；\|ΔF\| 对 \|F\| 作图；相对力误差 |
-| **1 静态性质** | 双原子曲线（平滑、短程排斥）、E–V/EOS（a₀、B₀）、弹性常数、声子（有无虚频）、空位/表面能 | ❌ | `mflow validate`：dimer / eos / phonon / defect |
-| **2 动力学** | NVE 能量漂移、升温稳定性、与 AIMD 的 RDF 对比、扩散、VDOS | ✅ `md` + `md-report` 闸门（NVE 漂移、RDF 对比、MSD） | 升温稳定性阶梯；VDOS |
-| **3 应用相关** | 从**你自己的生产轨迹**抽帧送 DFT 复算（Morrow 等最推荐的一条）；直接算目标性质 | 半自动：`calc -model a,b,c` 用委员会选帧 | `mflow al` 主动学习闭环，接 TFlow 做 DFT |
+| 层 | 内容 | MFlow |
+|---|---|---|
+| **0 误差** | 测试集 E/F 的 RMSE、MAE；按组、**按元素**拆分；\|ΔF\| 对 \|F\|（大力构型单独看）；相对力误差 | `train-report` / `calc -group` |
+| **1 静态性质** | 双原子曲线（平滑、短程排斥）、E–V/EOS（V₀、B₀、B′）、声子（有无虚频）、空位/表面能 | `mflow validate dimer / eos / phonon / defect`（见 1.7） |
+| **2 动力学** | NVE 能量漂移、平衡检验、与 AIMD 的 RDF 对比、扩散（含扩散区判断）、VDOS | `md` 协议 + `md-report` 闸门（见 3.3–3.4） |
+| **3 应用相关** | 从**你自己的生产轨迹**抽帧送 DFT 复算（Morrow 等最推荐的一条）；直接算目标性质 | `mflow al`（见第四章），TFlow 做 DFT |
+
+### 1.7 静态性质：`mflow validate`
+
+```bash
+mflow validate dimer  -model cu/cu.model -elements Cu,O                        # 每个元素对的双原子曲线
+mflow validate eos    -model cu/cu.model -in cu_relaxed.xyz -ref "V0=11.8,B0=140"
+mflow validate phonon -model cu/cu.model -in cu_relaxed.xyz -supercell 4       # 需要 pip install phonopy seekpath
+mflow validate defect -model cu/cu.model -in cu_conv.xyz -surface 111,100      # 空位形成能、表面能
+```
+
+| 子命令 | 怎么做 | 判据（`thresholds.yaml` 的 `validate` 段） |
+|---|---|---|
+| `dimer` | MLIP Arena 的网格（0.9·r_cov → 3.1·r_vdW，0.01 Å），扣孤立原子能量 | 短程墙有"洞"或 E(r_min) ≤ E(∞) → **fail**（MD 会塌缩）；力变号次数 ≠ 1、多余极值、能量跳变、\|F + dE/dr\| > 0.05 eV/Å、尾部不归零 → warn |
+| `eos` | ±4 % 线应变 11 个体积，每个体积内弛豫原子位置，Birch–Murnaghan 拟合 | 极小值在采样范围内；E(V) 凸；与 `-ref` 相对误差 < 10 % pass、< 25 % warn |
+| `phonon` | 先在固定晶胞下对称弛豫（fmax 1e-3），phonopy 有限位移 0.01 Å，Γ 中心 q 网格 | 低于 −0.1 THz 的频率算虚频；出现即 warn，低于 −0.5 THz fail |
+| `defect` | 晶胞扩到每个方向 ≥ 10 Å；去一个原子后弛豫；`ase.build.surface` 建板 | 单质给 E_f = E(N−1) − (N−1)/N·E(N)；化合物只给原始差值（形成能需要化学势） |
+
+所有命令都会先检查输入是否已经弛豫（|F| < 0.05 eV/Å、|σ| < 0.5 GPa），没弛豫会 warn：先 `mflow relax` 或 `mflow md -protocol minimize`。
+`-model emt` 用 ASE 的 EMT 代替 MACE，方便没有模型时先试命令。
 
 ---
 
@@ -248,13 +269,16 @@ E0 alignment (fit), eV per atom of element: O -0.2076 · Si +0.3542
 mflow calc -in md_frames.xyz -model s1.model,s2.model,s3.model -prefix com_
 ```
 
-- **委员会怎么组。** 同样的数据、同样的架构，用 3–5 个不同的 seed 训练（v0.2 会提供 `train -committee N` 一键训练）。
+- **委员会怎么组。** `mflow train -committee 4` 一键训练 4 个成员：每个成员换 seed，微调时默认再做 **bagging**（每个成员随机用 80 % 的训练集）。原因：从同一个基础模型微调出来的成员起点相同，只换 seed 时彼此高度相关，σ 会严重偏小。输出 `committee.json` 和 `<name>_committee_report.json`（测试集上的误差 + 校准）。
 - **主动学习看什么。** 看 `com_Fdev_max`，即每个结构里最大的原子力偏差。`metrics.json` 的 `committee` 段给出它的分布。DP-GEN 惯用的信任窗口是 0.05–0.15 eV/Å：
   - 低于下限：模型已经会了；
   - 高于上限：多半是不物理的结构；
   - 落在窗口中间：送去 DFT。
 - **只用力偏差排序。** 能量标准差的指示性比力差。
-- ⚠️ **不确定度不等于误差。** 委员会的不确定度通常校准得不好，只能用来**排序**，不能当误差棒。v0.2 会在有参考的数据上报告不确定度与真实误差的 Spearman 相关和 miscalibration area，用来判断这组委员会是否可信。
+- ⚠️ **不确定度不等于误差。** 委员会的不确定度通常校准得不好。在有参考标签的数据上 `calc` 会给出校准表（`<stem>_calibration.png`）：
+  - **Spearman ρ**（σ 与 \|误差\| 的秩相关）：≥ 0.5 pass，≥ 0.2 warn，否则 σ 连排序都不可靠；
+  - **miscalibration area**、RMS 校准误差、sharpness；
+  - **RMS(误差)/RMS(σ)**：> 1 表示过度自信。主动学习筛选时会用这个比值把 σ 放大（variance scaling）。
 
 ### 2.4 结构弛豫：`mflow relax`
 
@@ -355,19 +379,19 @@ run             STEPS upto                     # 续跑时跑到总步数为止
 
 ### 3.3 系综怎么选
 
-v0.1 的 `-ensemble` 提供三种：`nvt`（Nosé–Hoover 链）、`npt`（Nosé–Hoover，各向同性 `iso`）、`nve`。
-下表是选择指南。标 **v0.2** 的选项需要等下一版（v0.1 里只能手写 LAMMPS 输入）。
+`-ensemble nvt|npt|nve`，`-thermostat nh|csvr|langevin`（Nosé–Hoover 链 / Bussi 随机速度重标 / Langevin），`-baro iso|aniso|tri`；
+多阶段的常用流程用 `-protocol`（见下一小节的表）。
 
 | 目的 | 推荐做法 | 原因 |
 |---|---|---|
-| 给定 T、P 下的平衡结构 / 密度 | `-ensemble npt -temp T -press P`；液体、非晶、立方晶体用 iso，正交非立方用 aniso，三斜用 tri（aniso/tri 为 **v0.2**） | 让体积自己达到平衡 |
+| 给定 T、P 下的平衡结构 / 密度 | `-protocol equilibrate -temp T -press P`；液体、非晶、立方晶体 `-baro iso`，正交非立方 `aniso`，三斜 `tri` | NPT 让体积平衡，再固定在后半段平均体积上做 NVT |
 | 给定体积下的结构、RDF | 先 npt 平衡，再 `-ensemble nvt` | 体积固定，涨落更小 |
-| **扩散系数、热导等输运性质** | npt/nvt 平衡之后，**生产段用 `nve`**，或用弱耦合的全局恒温器（NH/CSVR） | 强耦合的局部恒温器（如 Langevin）会**压低扩散**；NH、CSVR 与 NVE 在统计上无差别（Basconi & Shirts, *JCTC* 2013） |
+| **扩散系数、热导等输运性质** | `-protocol transport`：NPT → 平均体积 → NVT → **NVE 生产段** | 强耦合的局部恒温器（如 Langevin）会**压低扩散**；NH、CSVR 与 NVE 在统计上无差别（Basconi & Shirts, *JCTC* 2013） |
 | 检查势函数是否守恒、步长是否合适 | `-ensemble nve`，看 NVE 漂移闸门 | 漂移 < 5×10⁻⁴ eV/atom/ps 为通过（LAMBench 标准） |
-| 升温 / 退火 / 淬火 | `-temp T1 -temp_end T2`（线性变温） | 速率 1–10 K/ps；越慢越接近真实 |
-| 熔点 | 固液两相共存，在 **NPH** 下让温度自己落到 Tm（**v0.2** 协议） | 直接加热到熔化会有很大的过热滞后 |
-| 0 K 结构 / 晶格常数 | `mflow relax`，或 LAMMPS 的 `fix box/relax` + `minimize`（**v0.2** 协议） | |
-| 初始结构很差（原子重叠、能量很高） | 先用 CSVR（Bussi）或 Langevin 平衡（**v0.2** 的 `-thermostat`） | 稳健。不要用 Berendsen 做生产：系综不对，还会出现 flying ice cube |
+| 升温 / 退火 / 淬火 | `-protocol anneal` 或 `quench`，`-temp T1 -temp_end T2` | 报告给出 K/ps，> 10 K/ps warn；越慢越接近真实 |
+| 熔点 | `-protocol melt`：固液两相共存，**NPH** 下温度自己落到 Tm；按层的固相键数判断两相是否都在 | 直接加热到熔化会有很大的过热滞后（完美晶体可过热到约 1.2 Tm） |
+| 0 K 结构 / 晶格常数 | `mflow relax`，或 `-protocol minimize`（LAMMPS 的 `fix box/relax` + 反复 `minimize`，输出 `relaxed.xyz`） | box/relax 不是严格的极小化，要重复到晶胞不变（LAMMPS 文档） |
+| 初始结构很差（原子重叠、能量很高） | 先 `-protocol minimize`，再 `-thermostat csvr` 或 `langevin` 平衡 | 稳健。不要用 Berendsen 做生产：系综不对，还会出现 flying ice cube |
 
 **参数经验：**
 
@@ -378,7 +402,19 @@ v0.1 的 `-ensemble` 提供三种：`nvt`（Nosé–Hoover 链）、`npt`（Nos�
 | `-pdamp` | 默认 1000·dt | 同上 |
 | 原子数 | 每张卡 1000–4000 | 太少 GPU 闲置；晶胞宽度不要小于 2·r_max |
 | `-skip` | 默认 0.2 | 平衡段所占比例，这部分不参与闸门 |
-| 是否已平衡 | 生产段的温度、体积、势能都不再有趋势 | 跑完不等于平衡了；拿前后两半对比 |
+| 是否已平衡 | 生产段的温度、体积、势能都不再有趋势 | `md-report` 自动比较前后两半（差 > 3 个分块误差 warn） |
+
+**协议一览（`-protocol`）：**
+
+| 协议 | 阶段 | 报告里多出的内容 |
+|---|---|---|
+| `equilibrate` | NPT 50 %（结束时设为后半段平均体积）→ NVT 50 % | 闸门只看最后一段 |
+| `transport` | NPT 20 % → 平均体积 → NVT 10 % → NVE 70 % | NVE 漂移；D（总的和 x/y/z 分量）、MSD 双对数斜率（0.85–1.15 才算扩散区）；`-viscosity` 加 Yeh–Hummer 修正 |
+| `anneal` / `quench` | 升温–保温–降温 / 保温–降温 | 变温速率 K/ps |
+| `minimize` | box/relax + minimize 循环（最多 20 次） | 最大力、压强、体积变化、`relaxed.xyz` |
+| `melt` | NPT 晶体 → 上半盒在 `-melt_temp` 熔化（下半冻结）→ 两半都设到 `-temp` → NPH | T_m 估计 ± 分块误差、液相比例、体积是否失控（沸腾） |
+
+续跑（`-resume`）按阶段进行：已完成的阶段跳过，`-steps` 仍是总步数。
 
 ### 3.4 质量闸门：`mflow md-report`
 
@@ -397,15 +433,19 @@ mflow md-report -dir md300 -ref aimd.xyz      # 与 AIMD 比较 RDF
 | 体积（NPT） | 生产段体积变化 < 2% 为 pass，< 5% 为 warn |
 | 最近原子对 | 任何一帧 < 0.6 Å 即 fail（势函数在这里有"洞"，需要补数据） |
 | RDF 对比参考（`-ref`） | 每个元素对 g(r) 的平均绝对差 < 0.1 为 pass |
+| 平衡（前后两半） | T、PE（NPT 时加 V）前后两半之差 < 3 个分块误差 |
+| 扩散区 | 可动元素的 MSD 双对数斜率在 0.85–1.15；在 NVT/NPT 下测扩散会提示改用 transport |
 
-分析与作图（`md_summary.png`，2×3）：T、P、E、V 随时间的变化（灰色区域为平衡段）、按元素对分开的 RDF、MSD 与扩散系数。
+统计：均值的误差用分块平均（Flyvbjerg–Petersen），报告给出 `± SE` 和有效样本数 `n_eff`。
+分析与作图（`md_summary.png`，2×3）：T、P、E、V 随时间的变化（灰色为平衡段，虚线为协议阶段分界）、按元素对分开的 RDF、VDOS（帧间隔 ≤ 25 fs 时，否则画 MSD）。VDOS 由质量加权的速度自相关函数算出，写进 `vdos.dat`。
 
-**MD 崩了怎么办：** 先把 `-dt` 减半重跑。如果还崩，说明势函数在这个区域是外推，需要把这些构型补进训练集（见 v0.2 的主动学习）。
+**MD 崩了怎么办：** 先把 `-dt` 减半重跑。如果还崩，说明势函数在这个区域是外推，需要把这些构型补进训练集（见第四章的主动学习），并跑 `mflow validate dimer` 看短程墙。
 
 ### 3.5 有没有 skill 能辅助设定
 
-有。仓库自带 [`skills/mflow-md`](skills/mflow-md/SKILL.md)，规定了固定的执行顺序、参数范围和常见问题的处理。
-v0.2 会参考下面这些公开 skill 补充"经验"类 skill，只借鉴写法和经验，不直接复制：
+有。[`skills/mflow-md`](skills/mflow-md/SKILL.md) 规定执行顺序、参数范围和常见问题；
+[`mflow-md-setup`](skills/mflow-md-setup/SKILL.md)（系综、步长、盒子）、[`mflow-property-protocols`](skills/mflow-property-protocols/SKILL.md)（熔点、扩散、RDF、非晶）、[`mflow-failure-triage`](skills/mflow-failure-triage/SKILL.md)（崩溃排错）是经验类 skill。
+它们参考了下面这些公开 skill，只借鉴写法和经验、不直接复制，出处记在各 skill 的 `references/SOURCES.md`：
 
 | 来源 | 可借鉴的经验 |
 |---|---|
@@ -415,7 +455,58 @@ v0.2 会参考下面这些公开 skill 补充"经验"类 skill，只借鉴写法
 
 ---
 
-## 四、给 agent 用：skills
+## 四、主动学习：`mflow al`
+
+**MFlow 负责"提议、挑选、交出去、收回来、再训练、判断何时停"，DFT 由 [TFlow](https://github.com/MengnanCui/TFlow) 算。**
+
+```bash
+mflow al init   -name cu_al -system start.xyz -data dft.xyz -test test.xyz -foundation mpa -committee 4
+mflow al run    -name cu_al                 # 第 0 轮：基础模型探索 → FPS 选帧 → 导出给 TFlow，然后停下
+#   …… 在 TFlow 里算 round_00/export/candidates.extxyz（命令写在 round_00/export/README.txt）……
+mflow al import -name cu_al -tflow /path/to/calc_dir
+mflow al run    -name cu_al                 # 训练委员会 → 探索 → 委员会筛选 → 导出（下一轮），再停下
+mflow al status -name cu_al                 # 台账 + 停止判据
+```
+
+每一步也能单独跑：`al explore / select / export / import / train`。`al run` 走到"需要 DFT"时一定停下（人工闸门）。
+
+### 4.1 一轮做什么
+
+| 步骤 | 做法 | 在哪改 |
+|---|---|---|
+| 探索 | `md`：T（和 P）网格上的短 MD，每轮温度乘 `widen`（默认 1.25）；引擎 `ase`（Langevin）或 `lammps`（走 `mflow md`，自动导出成员 0）。`perturb`：rattle + 随机应变（+ 空位）。`minhop`：ASE 极小值跳跃，**所有到过的局部极小**都收（不只被接受的） | `campaign.yaml` 的 `explore` |
+| 筛选 | 第 0 轮没有委员会：只做多样性（MACE 描述子上的 FPS）。之后：委员会力偏差 `Fdev_max`，DP-GEN 式分类 accurate / candidate / failed；信任窗口 `fixed`（0.05–0.15 eV/Å）、`auto`（训练集偏差的 Q3 + 1.5·IQR，委员会没收敛时自动退回 fixed）、`relative`；σ 先按测试集上的 RMS(误差)/RMS(σ) 放大；候选再用 FPS（相对已有训练集）限量 `max_per_round` | `select` |
+| 导出 | `round_NN/export/candidates.extxyz`（只有几何和 `mflow_id`）、`run_label.py`（给 `vaspctl submit --src-run` 的单点脚本）、`manifest.json`、`README.txt`（四条命令） | `run_label.py` 里的 INCAR：**整个活动保持一致**，并和基础模型的 DFT 设置对齐 |
+| 收回 | 读 TFlow 的 `job_map.json`，按 `info.mflow_id` 对回去，解析 `static/OUTCAR`；**拒收**：状态不是 done、跑过 error fix（`error_job_*`、KPOINTS 被改）、SCF 步数达到 NELM（TFlow 对 static 不查这个）、结构被改过、OUTCAR 读不了；再过一遍 `check` 的规则（NaN、力过大、原子过近）。拒收原因写 `rejects.jsonl` | `-tflow <calc_dir>`，或 `-in labelled.xyz`（任何带 `mflow_id` 和参考标签的 extxyz） |
+| 训练 | 数据集**每轮重建**（initial + 所有已标注轮次），测试集固定；委员会 `train -committee N`（bagging），记下 Spearman 和 σ 比值 | `train` |
+| 判断 | `al status`：候选比例 < 5 %；**新帧误差**（这一轮 DFT 刚算、模型没见过的帧）能量 < 10 meV/atom、力 < 50 meV/Å。都满足才建议停，然后还要跑生产 MD 看闸门 | `stop`，或 `thresholds.yaml` 的 `al` 段 |
+
+`ledger.jsonl` 只追加：每一步的设置、数量、模型、误差都记在里面；`state.json` 是当前轮次和阶段。
+
+### 4.2 与 TFlow 的约定
+
+```bash
+vaspctl prepare <calc_dir> round_00/export/candidates.extxyz --id-key mflow_id --tag mflow_r00
+vaspctl submit  <calc_dir> --src-run round_00/export/run_label.py --src-submit <submit.sh> --max-concurrent 20 --auto-resume --watch
+vaspctl report  <calc_dir> --task-dirs static --no-queue
+mflow al import -name cu_al -tflow <calc_dir>
+```
+
+- `REF_energy` 取 VASP 的 free energy（TOTEN，力是它的导数），σ→0 的能量另存为 `REF_energy_sigma0`；`REF_stress` 是 ASE 约定（eV/Å³，符号已翻转）。
+- TFlow 的错误修复可能缩放体积或改 KPOINTS，修复后算出来的不是你要的那个结构或设置，MFlow 一律拒收而不是"将就"。
+
+### 4.3 方案怎么选
+
+依据见[路线图第 1 节](docs/roadmap-v0.2.md#1-训练方案全景来自-20242026-年的综述)（Kulichenko 2024 *Chem. Rev.*、Grasselli 2025、Tompa 2026 等）。经验写在 [`mflow-active-learning-campaign`](skills/mflow-active-learning-campaign/SKILL.md)：
+
+- 体相、液体：`md` 网格 + `perturb`；团簇、表面：加 `minhop`。
+- 委员会 ≥ 3，建议 4；微调时保持 bagging。
+- `trust: fixed` 起步；委员会校准好（Spearman ≥ 0.5）后再试 `auto`。
+- 一轮 50–150 个结构；连续两轮候选比例不降，说明探索不够（加温度、加步数、开 minhop），而不是模型够好了。
+
+---
+
+## 五、给 agent 用：skills
 
 [`skills/`](skills/) 里的 skill 遵循 [agentskills.io](https://agentskills.io/specification) 标准，pi 会自动加载。
 安装：`ln -s "$PWD/skills/"* ~/.agents/skills/`。
@@ -431,7 +522,7 @@ v0.1 的 skill 以流程为主；v0.2 会补 9 个经验类 skill，见[路线�
 
 ---
 
-## 五、输出文件与约定
+## 六、输出文件与约定
 
 | 命令 | 主要输出 |
 |---|---|
@@ -441,7 +532,10 @@ v0.1 的 skill 以流程为主；v0.2 会补 9 个经验类 skill，见[路线�
 | `relax` | `<stem>_relax.xyz` · `<stem>_relax_metrics.json` · `<stem>_relax.png` |
 | `deploy` | `deploy/deploy.json` · `*.model-mliap_lammps.pt` · `deploy_report.json` |
 | `lmp-check` | `lmp_check/lmp_env.json` |
-| `md` / `md-report` | `<dir>/in.lammps` · `data.lmp` · `log.lammps` · `traj.lammpstrj` · `md.json` · `md_report.json` · `md_summary.png` |
+| `md` / `md-report` | `<dir>/in.lammps` · `data.lmp` · `log.lammps` · `traj.lammpstrj` · `md.json` · `md_report.json` · `md_summary.png`；协议另有 `vdos.dat` · `phase_profile.dat`（melt）· `relaxed.xyz`（minimize） |
+| `train -committee N` | `<dir>/m0..m{N-1}/` · `committee.json` · `<name>_committee_report.json` · `committee_calibration.png` |
+| `validate` | `validate/<stem>_<kind>.json` · `.png` |
+| `al` | `<campaign>/campaign.yaml` · `state.json` · `ledger.jsonl` · `status.json` · `data/train_vNN.xyz` · `round_NN/{explore,select,export,train}/` |
 | 所有命令 | `py.log`：终端输出的无色副本 |
 
 **约定：**
@@ -456,11 +550,12 @@ v0.1 的 skill 以流程为主；v0.2 会补 9 个经验类 skill，见[路线�
 
 ---
 
-## 六、版本
+## 七、版本
 
 | 版本 | 内容 |
 |---|---|
-| **v0.1（当前）** | 包结构；`check` / `train` / `train-report`；`calc`（含委员会）/ `relax` / `plot`；`deploy` / `lmp-check` / `md` / `md-report`；3 个流程类 skill；22 个测试 |
-| **v0.2（规划中）** | 精度评估第 1、2 层（`validate`）；不确定度校准；LAMMPS 协议库（多种恒温器/恒压器、熔点、输运、0 K）；**训练方案：委员会训练 + 主动学习闭环**（用 MD / 极小值跳跃 / 随机结构搜索探索 → 委员会或多样性筛选 → TFlow 标注 → 再训练 → 判断何时停止）；9 个经验类 skill。详见 [docs/roadmap-v0.2.md](docs/roadmap-v0.2.md) |
+| v0.1 | 包结构；`check` / `train` / `train-report`；`calc`（含委员会）/ `relax` / `plot`；`deploy` / `lmp-check` / `md` / `md-report`；3 个流程类 skill |
+| **v0.2.0a1（当前）** | a：`train -committee`（bagging）、不确定度校准、力误差按元素、`thresholds.yaml`；b：`mflow al` 主动学习闭环 + TFlow 对接；c：极小值跳跃探索；d：`validate`（dimer/eos/phonon/defect）、LAMMPS 协议库（恒温器/恒压器、equilibrate/transport/anneal/quench/minimize/melt）、`md-report` 统计（分块误差、平衡检验、扩散区、VDOS、Yeh–Hummer）；e：9 个经验类 skill。42 个测试。**尚未在 GPU + 真实 MACE/LAMMPS 上做端到端验证**（测试用 EMT / LJ / EAM 代替） |
+| 以后 | 随机结构搜索探索、多头委员会（MACE PR #800 合并后）、不确定度偏置 MD、PLUMED 增强采样模板、集群提交，见路线图 |
 
 v0.1 之前是单文件脚本 `mflow.py`（内部版本 0.2–0.6，只有 calc/relax/plot），现已并入当前的包，计算结果逐位一致。

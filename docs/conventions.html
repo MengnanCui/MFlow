@@ -171,6 +171,8 @@
       <li><a href="#risks">风险清单</a></li>
       <li><a href="#train">训练（check / train）</a></li>
       <li><a href="#lammps">LAMMPS 动力学</a></li>
+      <li><a href="#protocols">MD 协议与统计</a></li>
+      <li><a href="#al">主动学习与 TFlow</a></li>
     </ol>
   </nav>
 </header>
@@ -894,9 +896,48 @@ R²     = corrcoef(ref, pred)² </code></pre>
   力误差低并不保证 MD 稳定（Fu et al., arXiv 2210.07237），所以闸门对每条轨迹都跑。</p>
 </section>
 
+<section id="protocols">
+  <h2><span class="num">15</span>MD 协议与统计（v0.2）</h2>
+  <p class="sub">多阶段协议里 MFlow 替你做的决定</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>决定</th><th>做法</th><th>原因</th></tr></thead>
+      <tbody>
+        <tr><td>协议的闸门看哪一段</td><td>只看最后一段，段内不再跳过</td><td>前面各段就是它的平衡</td></tr>
+        <tr><td>NPT 之后的体积</td><td><span class="mono">fix ave/time</span> 取 NPT 段后半的平均体积，<span class="mono">change_box … scale … remap</span> 等比缩放（三斜时倾斜因子同比）</td><td>用最后一帧的体积会带上涨落</td></tr>
+        <tr><td>csvr / langevin</td><td>只控温，位置由 <span class="mono">fix nve</span>（或 <span class="mono">nph</span>）积分；langevin 加 <span class="mono">zero yes</span></td><td>LAMMPS 文档；<span class="mono">temp/csvr/kk</span> 从 2Sep2026 起才有</td></tr>
+        <tr><td>tri 恒压</td><td>data 文件强制写倾斜因子</td><td>LAMMPS 要求三斜盒子，哪怕倾斜为 0</td></tr>
+        <tr><td>minimize</td><td><span class="mono">suffix off</span> 后 <span class="mono">min_style cg</span> + <span class="mono">box/relax</span>，<span class="mono">norm max</span>，重复到 |ΔV|/V &lt; 1e-6（最多 20 次）</td><td><span class="mono">box/relax</span> 没有 KOKKOS 版本，<span class="mono">cg/kk</span> 不支持它；它不是严格的极小化</td></tr>
+        <tr><td>melt</td><td>上半盒在<strong>固定体积</strong>下 NVT 熔化，下半 <span class="mono">setforce 0</span> 冻结；随后两半速度都设到 T，NPH（x、y 耦合，z 独立）</td><td>只让液相做 NPT 时，压强包含冻结晶体，盒子会失控膨胀</td></tr>
+        <tr><td>相的判断</td><td>每层的 ten Wolde 固相键数（第一壳层 = 1.2 × 中位最近邻距离内，q6(i)·q6(j) &gt; 0.5），切分点取 NPH 开始时最有序与最无序层的中点（原子数加权）</td><td>原始 q6（12 近邻）在高温晶体和液体里都是约 0.35，分不开</td></tr>
+        <tr><td>均值的误差</td><td>Flyvbjerg–Petersen 分块，取至少 8 块时的最大 SE</td><td>保守</td></tr>
+        <tr><td>扩散</td><td>MSD 后 80 % 线性拟合；双对数斜率 0.85–1.15 才算扩散区；MSD 末端 &lt; 1 Å² 视为不扩散</td><td>Maginn et al., LiveCoMS 2019</td></tr>
+        <tr><td>VDOS</td><td>质量加权 VACF（FFT，全部时间原点），单边 Hann 窗，面积归一；Nyquist &lt; 20 THz 时不算</td><td>LAMMPS 的 <span class="mono">compute vacf</span> 不加权且只有一个时间原点</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="al">
+  <h2><span class="num">16</span>主动学习与 TFlow（v0.2）</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>决定</th><th>做法</th><th>原因</th></tr></thead>
+      <tbody>
+        <tr><td>委员会成员</td><td>不同 seed；微调时默认 bagging 80 %</td><td>同一基础模型微调出的成员高度相关，σ 偏小</td></tr>
+        <tr><td>σ 的校准</td><td>筛选前乘以测试集上的 RMS(误差)/RMS(σ)（大于 1 时）</td><td>固定的 eV/Å 窗口才有意义</td></tr>
+        <tr><td><span class="mono">REF_energy</span></td><td>VASP 的 free energy（TOTEN）；σ→0 能量另存</td><td>力是 free energy 的导数</td></tr>
+        <tr><td>拒收</td><td>非 done、<span class="mono">error_job_*</span>、KPOINTS 被改、SCF 步数 ≥ NELM、结构改变、OUTCAR 读不了</td><td>TFlow 的修复会改结构或设置，static 任务也不检查 SCF</td></tr>
+        <tr><td>数据集</td><td>每轮从 initial + 全部已标注轮次重建；测试集固定</td><td>可复现；轮次之间可比</td></tr>
+        <tr><td>"新帧误差"</td><td>本轮 DFT 刚算、模型没见过的帧上的委员会误差</td><td>唯一不偏乐观的精度估计</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
 
 <footer>
-  MFlow v0.6.0 · docs/conventions.html · MengnanCui/MFlow
+  MFlow v0.2.0a1 · docs/conventions.html · MengnanCui/MFlow
 </footer>
 
 </div>

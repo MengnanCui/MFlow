@@ -1,6 +1,6 @@
 ---
 name: mflow-md
-description: Run molecular dynamics in LAMMPS with a MACE model through ML-IAP + KOKKOS using MFlow, then analyse it. Use when the user wants NVT / NPT / NVE MD, melting, diffusion, RDF, or to check whether a MACE potential is stable in MD. Covers `mflow deploy`, `mflow lmp-check`, `mflow md`, `mflow md-report`.
+description: Run molecular dynamics in LAMMPS with a MACE model through ML-IAP + KOKKOS using MFlow, then analyse it. Use when the user wants NVT / NPT / NVE MD, cell relaxation, annealing or quenching, melting points, diffusion, RDF, VDOS, or to check whether a MACE potential is stable in MD. Covers `mflow deploy`, `mflow lmp-check`, `mflow md` (protocols), `mflow md-report`. For choosing ensembles and timesteps see mflow-md-setup; for property recipes see mflow-property-protocols.
 ---
 
 # LAMMPS 动力学（MFlow，ML-IAP + KOKKOS）
@@ -32,6 +32,25 @@ description: Run molecular dynamics in LAMMPS with a MACE model through ML-IAP +
 | `-ngpu N` | 多卡是实验性的（ML-IAP 多卡在部分 LAMMPS 版本会崩），先单卡 |
 | `-dump` / `-thermo` | 总帧数控制在 1e4 量级以内 |
 
+## 协议（`-protocol`，多阶段，一个 in.lammps 里完成）
+
+| 协议 | 阶段 | 用途 |
+|---|---|---|
+| `single`（默认） | `-ensemble` 一段 | 普通 NVT / NPT / NVE |
+| `equilibrate` | NPT 50 %（结束时体积设为后半段平均值）→ NVT 50 % | 得到目标 T/P 下的平衡结构 |
+| `transport` | NPT 20 % → 平均体积 → NVT 10 % → **NVE 70 %** | 扩散系数、VDOS：生产段没有恒温器干扰动力学 |
+| `anneal` | 升温 40 % → 保温 20 % → 降温 40 %（`-ensemble npt` 时全程 NPT） | 退火、消除缺陷 |
+| `quench` | 保温 20 % → 降温 80 % 到 `-temp_end` | 非晶/玻璃；报告给出 K/ps |
+| `minimize` | `fix box/relax` + 反复 `minimize` 直到晶胞不变 | LAMMPS 里的晶胞弛豫，输出 `relaxed.xyz` |
+| `melt` | NPT 晶体 20 % → 上半盒（z）在 `-melt_temp` 熔化、下半冻结 15 % → 两半都设到 `-temp` → **NPH** 65 % | 固液共存法熔点 |
+
+- `-thermostat nh|csvr|langevin`：默认 Nosé–Hoover；`csvr`（Bussi）+ nve 是更稳的选择，它的 KOKKOS 版本要 LAMMPS ≥ 2Sep2026，旧版在 CPU 上跑（结果对，只是慢）。`langevin` 会改变动力学，不能用于扩散。
+- `-baro iso|aniso|tri`：立方/液体用 iso，正交非立方用 aniso，三斜/剪切用 tri（MFlow 自动写倾斜因子）。
+- `melt`：盒子沿 z 拉长（Lz ≈ 2–4 Lx），`-temp` 取熔点的猜测值，`-melt_temp` ≈ 1.5 × 猜测值（不要超过沸点）。报告按层统计 ten Wolde 固相键数判断哪层是晶体：
+  - `melt: phases` pass → 两相共存，T 就是 T_m 估计；
+  - 全液 → `-temp` 降低再跑；全晶 → 升高；"one phase only" → 看建议（熔化不够或晶体也熔了）。
+- `minimize` 不能 `-resume`（重跑即可）；其他协议按阶段续跑。
+
 ## 常见问题
 
 | 现象 | 下一步 |
@@ -41,7 +60,13 @@ description: Run molecular dynamics in LAMMPS with a MACE model through ML-IAP +
 | `temperature drift` warn | 跑更长的平衡段，或调大 `-skip` 重新出报告 |
 | 想继续跑 | 同一命令加 `-resume`，`-steps` 是**总步数**（run ... upto） |
 
+| `equilibrated (half vs half)` warn | 生产段前后两半差 > 3 个分块误差：延长或加大 `-skip` |
+| `diffusive regime` warn | MSD 双对数斜率不在 0.85–1.15：跑更久，或多个 seed 平均 |
+| `transport ensemble` warn | 扩散在 NVT/NPT 下测的：改用 `-protocol transport` |
+| 没有 VDOS | 帧间隔太大（Nyquist < 20 THz）：`-dump 5` 或 `10`（1 fs 步长时） |
+
 ```bash
 mflow md-report -dir md_300K -skip 0.3 -stride 5     # 重新分析
 mflow md-report -dir md_300K -ref aimd.xyz            # 和 AIMD 比 RDF
+mflow md-report -dir d900 -viscosity 4.0              # 加 Yeh–Hummer 有限尺寸修正（η 单位 mPa·s，同一模型算的）
 ```

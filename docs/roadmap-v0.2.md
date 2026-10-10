@@ -1,6 +1,6 @@
 # MFlow v0.2 路线图
 
-> 状态：规划（2026-10）。v0.1 已完成的内容见 [README](../README.md)。
+> 状态：**v0.2.0a1 已实现 a–e**（2026-10），尚未在 GPU + 真实 MACE/LAMMPS 上做端到端验证。实现与规划的差异见第 7 节。v0.1 的内容见 [README](../README.md)。
 > 范围约定：**DFT 计算不在 MFlow 里做**，由 TFlow 负责；MFlow 只负责"提议哪些结构值得算、选出来、交出去、收回来、再训练、判断何时停"。
 
 v0.2 有四条主线：
@@ -217,3 +217,19 @@ stop:
 - 集群作业提交（需要时再接 dpdispatcher）。
 - LAMMPS 内在线计算 MACE 不确定度（上游不支持，见调研报告）。
 - 不确定度偏置 MD、对抗攻击、生成模型（v0.3 再评估）。
+
+## 7. 实现状态（v0.2.0a1）与规划的差异
+
+| 规划 | 实现 | 说明 |
+|---|---|---|
+| `al seed` | 并入 `al explore` / `al run` 的第 0 轮 | 第 0 轮没有委员会时自动只做多样性筛选（FPS），不需要单独的命令 |
+| `campaign.yaml` 的 `trust: {mode, lo, hi}` | `select: {trust, lo, hi, recalibrate, dedupe, max_per_round}` | 增加 `recalibrate`：按测试集 RMS(误差)/RMS(σ) 放大 σ（微调委员会普遍过度自信）；`auto` 在委员会没收敛时退回 fixed；全部帧都 failed 时从 failed 池里按多样性选（模型还没准备好，而不是结构不物理） |
+| 去重 `fps \| quests` | 只有 `fps`（MACE 描述子，相对已有训练集） | QUESTS 熵作为去重和停止判据：⏳ 下一步 |
+| 停止判据 1–4 | 1（候选比例）、2（新帧误差，用委员会算）已实现 | 3（生产 MD 闸门 + 目标性质收敛）目前靠用户跑 `md` 后判断；4（QUESTS）⏳ |
+| TFlow 返回 extxyz | 直接读 TFlow 的 `job_map.json` + `static/OUTCAR`（也接受 extxyz） | TFlow 没有 MLIP 导出命令；MFlow 侧做拒收规则：非 done、error fix、KPOINTS 被改、SCF 达到 NELM、结构改变 |
+| `explore rss`、`fix plumed` 模板、`train -mode distill` | ⏳ | |
+| `validate` 弹性常数 | ⏳ | dimer / eos / phonon / defect 已实现；dimer 用 MLIP Arena 的网格和指标 |
+| 升温稳定性阶梯 | 用 `-protocol anneal` 代替 | |
+| melt 协议 | 实现时改了两处 | 熔化半盒在**固定体积**下进行（只让液相做 NPT 会让盒子失控膨胀）；相判断用 ten Wolde 固相键数（原始 q6 分不清高温晶体和液体），用 Sutton–Chen Cu 的共存测试核对过 |
+
+**建议 TFlow 侧补充（未改动 TFlow）：** `vaspctl export-mlip`（直接写带 `REF_*` 的 extxyz）；static 任务记录 SCF 是否收敛；为 MLIP 标注提供"禁止改结构的 error fix"开关。
