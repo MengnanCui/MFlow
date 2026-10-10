@@ -10,19 +10,34 @@ from .calc import cmd_calc, cmd_plot
 from .log import LOG
 from .model import DEFAULT_MODEL
 from .relax import OPTIMIZERS, cmd_relax
+from .train.config import MODES
 
 EXAMPLES = """examples
-  mflow calc -in data.xyz                                  # default model, batch 32
-  mflow calc -in data.xyz -model mpa -batch 64             # download a foundation model
+  mflow calc -in data.xyz                           # default model, batch 32
+  mflow calc -in data.xyz -model mpa -batch 64      # download a foundation model
   mflow calc -in data.xyz -model ./my.model -prefix mace_
-  mflow calc -in data.xyz -ref dft_                        # compare with dft_energy/dft_forces
-  mflow calc -in data.xyz -group config_type               # errors split by label
-  mflow plot -in data_mace.xyz -group formula              # re-plot, no recompute
+  mflow calc -in data.xyz -ref dft_                 # compare with dft_energy/dft_forces
+  mflow calc -in data.xyz -group config_type        # errors split by label
+  mflow calc -in md.xyz -model a.model,b.model,c.model
+  mflow plot -in data_mace.xyz -group formula       # re-plot, no recompute
 
-  mflow relax -in data.xyz                                  # relax positions + cell, fmax 0.05
-  mflow relax -in data.xyz -cell none -fmax 0.02  # fixed cell, tighter
-  mflow relax -in data.xyz -nproc 3 -dtype float32              # 3 workers sharing one gpu
-  mflow relax -in data.xyz -resume                          # continue an interrupted run"""
+  mflow relax -in data.xyz                          # relax positions + cell, fmax 0.05
+  mflow relax -in data.xyz -cell none -fmax 0.02    # fixed cell, tighter
+  mflow relax -in data.xyz -nproc 3 -dtype float32  # 3 workers sharing one gpu
+  mflow relax -in data.xyz -resume                  # continue an interrupted run
+
+  mflow check -in train.xyz -model mpa -split 0.1   # health + zero-shot + split
+  mflow train -in train.xyz -test test.xyz -name cu # fine-tune MACE-MPA-0, watch it, report
+  mflow train -in train.xyz -mode multihead -foundation mh1 -name cu -dry
+  mflow train-report -dir cu                        # re-analyse a finished run"""
+
+
+def _lazy(module: str, name: str):
+    """The command is imported only when it runs, so `mflow -h` never pays for torch."""
+    def run(args):
+        import importlib
+        return getattr(importlib.import_module(module), name)(args)
+    return run
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,6 +105,63 @@ def build_parser() -> argparse.ArgumentParser:
     relax.add_argument("-resume", action="store_true",
                        help="skip structures already finished in <stem>_relax.part.xyz")
     relax.set_defaults(func=cmd_relax)
+
+    check = sub.add_parser("check", parents=[common], help="dataset health check before training",
+                           epilog=EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    check.add_argument("-test", default=None, metavar="FILE", help="test set, checked for labels and overlap")
+    check.add_argument("-ref", dest="ref_prefix", default=None, metavar="PREFIX",
+                       help="reference label prefix, e.g. REF_ [auto-detect]")
+    check.add_argument("-model", default=None, metavar="PATH|NAME",
+                       help="foundation model for a zero-shot pass (element coverage, error, E0 offset) [off]")
+    check.add_argument("-head", default=None, help="head of a multi-head model")
+    check.add_argument("-split", type=float, default=None, metavar="FRAC",
+                       help="write <stem>_train.xyz / <stem>_test.xyz, stratified by group [off]")
+    check.add_argument("-seed", type=int, default=0, help="split seed [0]")
+    check.add_argument("-device", default="auto", choices=["auto", "cpu", "cuda", "mps"], help="[auto]")
+    check.add_argument("-dtype", default="float64", choices=["float64", "float32"], help="[float64]")
+    check.add_argument("-noplot", dest="no_plot", action="store_true", help="skip the figure")
+    check.set_defaults(func=_lazy("mflow.train.check", "cmd_check"))
+
+    train = sub.add_parser("train", help="check data, write config.yaml, run mace_run_train and watch it",
+                           epilog=EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    train.add_argument("-in", "--input", dest="input", required=True, metavar="FILE", help="training xyz")
+    train.add_argument("-index", default=":", help="ase slice of the training file [:]")
+    train.add_argument("-name", required=True, help="run name (MACE file names, default run directory)")
+    train.add_argument("-outdir", default=None, help="run directory [./<name>]")
+    train.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
+    train.add_argument("-test", default=None, metavar="FILE", help="test set, evaluated at the end")
+    train.add_argument("-valid", default=None, metavar="FILE", help="validation set [10%% of train]")
+    train.add_argument("-ref", dest="ref_prefix", default=None, metavar="PREFIX", help="label prefix [auto]")
+    train.add_argument("-group", default=None, metavar="KEY", help="split the test errors by this label")
+    train.add_argument("-mode", default="finetune", choices=MODES, help="[finetune]")
+    train.add_argument("-foundation", default="mpa", metavar="NAME|PATH",
+                       help="model to start from: mpa / omat / mh1 / matpes / a .model file [mpa]")
+    train.add_argument("-head", default=None, help="foundation head to start from (mh-1: omat_pbe)")
+    train.add_argument("-pt", default=None, metavar="FILE|mp",
+                       help="replay data for -mode multihead [mp = Materials Project, downloaded]")
+    train.add_argument("-epochs", type=int, default=None, help="max epochs [mode default]")
+    train.add_argument("-batch", type=int, default=8, help="batch size [8]")
+    train.add_argument("-dtype", default="float32", choices=["float64", "float32"], help="[float32]")
+    train.add_argument("-device", default="auto", choices=["auto", "cpu", "cuda"], help="[auto]")
+    train.add_argument("-cueq", default="auto", choices=["auto", "on", "off"],
+                       help="cuEquivariance kernels [auto: on with cuda when installed]")
+    train.add_argument("-seed", type=int, default=123, help="[123]")
+    train.add_argument("-set", nargs="*", default=None, metavar="KEY=VALUE",
+                       help="extra mace_run_train options, checked against mace_run_train --help")
+    train.add_argument("-dry", action="store_true", help="write config.yaml only, do not train")
+    train.add_argument("-resume", action="store_true", help="continue from the latest checkpoint")
+    train.add_argument("-force", action="store_true", help="train even if the pre-flight check fails")
+    train.add_argument("-noplot", dest="no_plot", action="store_true", help="skip the figures")
+    train.set_defaults(func=_lazy("mflow.train.run", "cmd_train"))
+
+    report = sub.add_parser("train-report", help="learning curves, test-set accuracy and a verdict")
+    report.add_argument("-dir", required=True, help="run directory written by `mflow train`")
+    report.add_argument("-test", default=None, metavar="FILE", help="test set [the one in config.yaml]")
+    report.add_argument("-group", default=None, metavar="KEY", help="split the test errors by this label")
+    report.add_argument("-device", default="auto", choices=["auto", "cpu", "cuda"], help="[auto]")
+    report.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
+    report.add_argument("-noplot", dest="no_plot", action="store_true", help="skip the figures")
+    report.set_defaults(func=_lazy("mflow.train.report", "cmd_train_report"))
 
     plot = sub.add_parser("plot", parents=[common, compare], help="re-analyse an evaluated file")
     plot.add_argument("-pred", dest="pred_prefix", default="mpa0_", metavar="PREFIX",

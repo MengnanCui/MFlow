@@ -103,6 +103,40 @@ def run_mace(frames: list, **kwargs) -> list:
         return evaluate_ase(frames, **kwargs)
 
 
+def evaluate_committee(frames: list, specs: list, device: str, dtype: str, prefix: str,
+                       head: str | None) -> list:
+    """
+    Several models at once: the mean goes into <prefix>energy / <prefix>forces, the spread into
+        <prefix>Fdev      per atom, eV/Å   sqrt(mean_m |F_m - <F>|²)   (DP-GEN's model deviation)
+        <prefix>Fdev_max  per structure    max over atoms — what active learning selects on
+        <prefix>Edev      per structure    std of the energy over models, meV/atom
+    """
+    from mace.calculators import MACECalculator
+
+    paths = [resolve_model(s)[1] for s in specs]
+    calc = MACECalculator(model_paths=paths, device=device, default_dtype=dtype, **({"head": head} if head else {}))
+    ekey, fkey = keys(prefix)
+    t0 = time.perf_counter()
+    with Progress(*progress_columns("structures"), console=LOG.term, transient=True) as progress:
+        task = progress.add_task(f"committee of {len(paths)}", total=len(frames))
+        for atoms in frames:
+            work = Atoms(numbers=atoms.numbers, positions=atoms.positions, cell=atoms.cell, pbc=atoms.pbc)
+            work.calc = calc
+            atoms.calc = None
+            atoms.info[ekey] = float(work.get_potential_energy())
+            atoms.arrays[fkey] = work.get_forces()
+            comm = np.asarray(calc.results["forces_comm"])                     # (models, atoms, 3)
+            dev = np.sqrt(((comm - comm.mean(0)) ** 2).sum(-1).mean(0))
+            atoms.arrays[f"{prefix}Fdev"] = dev
+            atoms.info[f"{prefix}Fdev_max"] = float(dev.max())
+            atoms.info[f"{prefix}Edev"] = float(np.std(calc.results["energy_comm"]) / len(atoms) * 1000)
+            progress.advance(task)
+    fdev = np.array([a.info[f"{prefix}Fdev_max"] for a in frames])
+    LOG(f"[ok]done[/ok] {len(frames)} structures × {len(paths)} models in {elapsed(time.perf_counter() - t0)} · "
+        f"Fdev_max median {np.median(fdev):.3f} / max {fdev.max():.3f} eV/Å")
+    return frames
+
+
 # ============================================================================ #
 #  metrics
 
@@ -367,11 +401,14 @@ def cmd_calc(args) -> int:
     t0 = time.perf_counter()
     prefix, stem = fix_prefix(args.prefix), Path(args.input).stem
     outfile = args.output or str(Path(args.outdir) / f"{stem}_mace.xyz")
-    device, (kind, model) = pick_device(args.device), resolve_model(args.model)
+    device = pick_device(args.device)
+    committee = [s for s in args.model.split(",") if s] if "," in args.model else None
+    kind, model = ("committee", args.model) if committee else resolve_model(args.model)
 
     LOG.rule(f"MFlow {__version__} · calc")
     LOG.kv({"input": args.input, "index": args.index,
-            "model": model, "kind": "local file" if kind == "file" else "foundation",
+            "model": model, "kind": {"file": "local file", "committee": f"committee of {len(committee or [])}"}
+                                     .get(kind, "foundation"),
             "batch size": args.batch_size, "device": device,
             "dtype": args.dtype, "head": args.head or "—",
             "labels": " / ".join(keys(prefix)), "reference": args.ref_prefix or "auto",
@@ -385,8 +422,11 @@ def cmd_calc(args) -> int:
     ref = resolve_ref(frames, args.ref_prefix, prefix)
 
     LOG.rule("mace")
-    frames = run_mace(frames, spec=args.model, batch_size=args.batch_size,
-                      device=device, dtype=args.dtype, prefix=prefix, head=args.head)
+    if committee:
+        frames = evaluate_committee(frames, committee, device, args.dtype, prefix, args.head)
+    else:
+        frames = run_mace(frames, spec=args.model, batch_size=args.batch_size,
+                          device=device, dtype=args.dtype, prefix=prefix, head=args.head)
 
     LOG.rule("results")
     MONITOR.report()
@@ -415,6 +455,10 @@ def cmd_calc(args) -> int:
                "prefix": prefix, "ref_prefix": ref, "prediction": prediction, "errors": errors,
                "group_by": args.group, "by_group": by_group, "resources": MONITOR.summary(),
                "versions": versions()}
+    if committee:
+        fdev = np.array([a.info[f"{prefix}Fdev_max"] for a in frames])
+        metrics["committee"] = {"models": committee, "Fdev_max_eV_A": {
+            "median": float(np.median(fdev)), "p95": float(np.quantile(fdev, 0.95)), "max": float(fdev.max())}}
     json_file = Path(args.outdir) / f"{stem}_metrics.json"
     json_file.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
     LOG(f"json [key]{json_file}[/key] · total [hi]{elapsed(time.perf_counter() - t0)}[/hi]")

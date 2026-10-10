@@ -10,7 +10,7 @@ Writes  <stem>_mace.xyz / <stem>_relax.xyz (labels <prefix>energy, <prefix>force
         a summary png, a metrics json and py.log.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 # the names tools/ and older scripts import from `mflow`
 from .data import (REF_CANDIDATES, composition, energies, find_ref, fix_prefix, forces,  # noqa: E402,F401

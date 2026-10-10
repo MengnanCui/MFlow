@@ -51,9 +51,11 @@ class Report:
     # -- output -------------------------------------------------------------- #
     def show(self, title: str | None = None):
         if self.checks:
-            LOG(table(title or f"checks  {self.command}", ["check", "status", "detail"],
+            t = table(title or f"checks  {self.command}", ["check", "status", "detail"],
                       [(c["name"], f"[{STYLE[c['status']]}]{c['status']}[/]", c["message"])
-                       for c in self.checks], styles=["key"]))
+                       for c in self.checks], styles=["key"])
+            t.columns[2].justify, t.columns[2].no_wrap = "left", False
+            LOG(t)
         for s in self.suggestions:
             LOG(f"[warn]→[/warn] {s}")
         LOG(f"verdict [{STYLE[self.status]}]{self.status.upper()}[/] · "
