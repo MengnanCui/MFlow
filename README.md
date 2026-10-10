@@ -33,7 +33,7 @@
 pip install -e ".[mace]"          # 得到命令 mflow（也可以 python -m mflow ...）
 pip install -e ".[gpu,test]"      # 可选：cuequivariance-torch、nvidia-ml-py（GPU 监控）、pytest
 pip install -e ".[validate]"      # 可选：phonopy + seekpath（mflow validate phonon）
-pytest                            # 42 个测试：装了 mace-torch 会真训练，PATH 里有 lmp 会真跑 LAMMPS（LJ / EAM）
+pytest                            # 55 个测试：装了 mace-torch 会真训练，PATH 里有 lmp 会真跑 LAMMPS（LJ / EAM）
 ```
 
 - **LAMMPS** 需要另外从源码编译，打开 KOKKOS(CUDA)、ML-IAP、ML-SNAP、PYTHON、`MLIAP_ENABLE_PYTHON`，见 [3.1](#31-导出与环境检查)。
@@ -517,8 +517,22 @@ mflow al import -name cu_al -tflow <calc_dir>
 | [`mflow-md`](skills/mflow-md/SKILL.md) | 导出 → 环境检查 → dry run → MD → 报告；参数范围；一致性检查失败绝不绕过 |
 | [`mflow-report-reading`](skills/mflow-report-reading/SKILL.md) | 怎么读 JSON 报告；遇到 fail 必须停；不编造数字 |
 
+经验类（v0.2）：
+
+| skill | 用途 |
+|---|---|
+| [`mflow-research-protocol`](skills/mflow-research-protocol/SKILL.md) | 请求分类、计划与批准、成本估算、证据先于结论 |
+| [`mflow-finetune-strategy`](skills/mflow-finetune-strategy/SKILL.md) | 选基础模型、模式、E0、学习率；遗忘的征兆 |
+| [`mflow-dataset-curation`](skills/mflow-dataset-curation/SKILL.md) | 标签与单位、按来源切分、固定测试集 |
+| [`mflow-potential-acceptance`](skills/mflow-potential-acceptance/SKILL.md) | 四层验证，按用途设门槛 |
+| [`mflow-active-learning-campaign`](skills/mflow-active-learning-campaign/SKILL.md) | 探索器、信任窗口、拒收、何时停 |
+| [`mflow-md-setup`](skills/mflow-md-setup/SKILL.md) | 系综、步长、盒子、中止条件 |
+| [`mflow-property-protocols`](skills/mflow-property-protocols/SKILL.md) | 熔点、扩散、RDF、VDOS、非晶 |
+| [`mflow-failure-triage`](skills/mflow-failure-triage/SKILL.md) | 出错时的排查顺序 |
+| [`mflow-lab-notebook`](skills/mflow-lab-notebook/SKILL.md) | `NOTEBOOK.md` / `LESSONS.md` 与模板 |
+
 **分工：** 代码控制执行（顺序、校验、闸门）；skill 提供经验（选什么、够不够、下一步做什么）。
-v0.1 的 skill 以流程为主；v0.2 会补 9 个经验类 skill，见[路线图](docs/roadmap-v0.2.md#4-经验类-skills)。
+经验类 skill 改写自公开 skill 集合与文献，出处固定到 commit，记在各自的 `references/SOURCES.md`。
 
 ---
 
@@ -555,7 +569,7 @@ v0.1 的 skill 以流程为主；v0.2 会补 9 个经验类 skill，见[路线�
 | 版本 | 内容 |
 |---|---|
 | v0.1 | 包结构；`check` / `train` / `train-report`；`calc`（含委员会）/ `relax` / `plot`；`deploy` / `lmp-check` / `md` / `md-report`；3 个流程类 skill |
-| **v0.2.0a1（当前）** | a：`train -committee`（bagging）、不确定度校准、力误差按元素、`thresholds.yaml`；b：`mflow al` 主动学习闭环 + TFlow 对接；c：极小值跳跃探索；d：`validate`（dimer/eos/phonon/defect）、LAMMPS 协议库（恒温器/恒压器、equilibrate/transport/anneal/quench/minimize/melt）、`md-report` 统计（分块误差、平衡检验、扩散区、VDOS、Yeh–Hummer）；e：9 个经验类 skill。42 个测试。**尚未在 GPU + 真实 MACE/LAMMPS 上做端到端验证**（测试用 EMT / LJ / EAM 代替） |
+| **v0.2.0a1（当前）** | a：`train -committee`（bagging）、不确定度校准、力误差按元素、`thresholds.yaml`；b：`mflow al` 主动学习闭环 + TFlow 对接；c：极小值跳跃探索；d：`validate`（dimer/eos/phonon/defect）、LAMMPS 协议库（恒温器/恒压器、equilibrate/transport/anneal/quench/minimize/melt）、`md-report` 统计（分块误差、平衡检验、扩散区、VDOS、Yeh–Hummer）；e：9 个经验类 skill。55 个测试。**尚未在 GPU + 真实 MACE/LAMMPS 上做端到端验证**（测试用 EMT / LJ / EAM 代替） |
 | 以后 | 随机结构搜索探索、多头委员会（MACE PR #800 合并后）、不确定度偏置 MD、PLUMED 增强采样模板、集群提交，见路线图 |
 
 v0.1 之前是单文件脚本 `mflow.py`（内部版本 0.2–0.6，只有 calc/relax/plot），现已并入当前的包，计算结果逐位一致。
