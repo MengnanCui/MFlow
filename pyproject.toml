@@ -20,6 +20,7 @@ dependencies = [
 # torch must match your CUDA version: install it first, then `pip install -e .[mace]`
 mace = ["mace-torch==0.3.16"]
 gpu = ["cuequivariance-torch", "nvidia-ml-py"]
+validate = ["phonopy>=2.20", "seekpath"]   # mflow validate phonon (phonopy BSD-3)
 test = ["pytest"]
 
 [project.scripts]

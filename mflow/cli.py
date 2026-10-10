@@ -35,7 +35,12 @@ EXAMPLES = """examples
   mflow lmp-check -deploy deploy                    # can this LAMMPS run it?
   mflow md -in start.xyz -deploy deploy -temp 600 -steps 50000 -outdir md600
   mflow md -in start.xyz -deploy deploy -ensemble npt -press 1 -outdir npt -dry
-  mflow md-report -dir md600                        # gates, RDF, MSD, figure"""
+  mflow md-report -dir md600                        # gates, RDF, MSD, figure
+
+  mflow validate dimer -model cu.model -elements Cu  # short-range wall, smoothness
+  mflow validate eos -model cu.model -in cu.xyz -ref "V0=11.8,B0=140"
+  mflow validate phonon -model cu.model -in cu.xyz -supercell 4
+  mflow validate defect -model cu.model -in cu_conv.xyz -surface 111,100"""
 
 
 AL_EXAMPLES = """examples
@@ -239,6 +244,34 @@ def build_parser() -> argparse.ArgumentParser:
     mdrep.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
     mdrep.add_argument("-noplot", dest="no_plot", action="store_true", help="skip the figure")
     mdrep.set_defaults(func=_lazy("mflow.analysis.report", "cmd_md_report"))
+
+    val = sub.add_parser("validate", help="static properties: dimer curves, EOS, phonons, defects")
+    val.add_argument("kind", choices=["dimer", "eos", "phonon", "defect"])
+    val.add_argument("-model", default=DEFAULT_MODEL, help=f"model file or foundation name; emt for a dry try [{DEFAULT_MODEL}]")
+    val.add_argument("-head", default=None, help="head of a multi-head model")
+    val.add_argument("-dtype", default="float64", choices=["float32", "float64"], help="[float64]")
+    val.add_argument("-in", "--input", dest="input", default=None, metavar="FILE",
+                     help="structure (relaxed crystal for eos / phonon / defect; elements for dimer)")
+    val.add_argument("-index", default="-1", help="frame of -in [-1]")
+    val.add_argument("-elements", default=None, help="dimer: elements, e.g. Cu,Al [from -in]")
+    val.add_argument("-rmin", type=float, default=0.9, help="dimer: first distance, × covalent radius [0.9]")
+    val.add_argument("-rmax", type=float, default=None, help="dimer: last distance in Å [3.1 × vdW radius]")
+    val.add_argument("-dr", type=float, default=0.01, help="dimer: spacing in Å [0.01]")
+    val.add_argument("-npts", type=int, default=11, help="eos: volumes [11]")
+    val.add_argument("-strain", type=float, default=0.04, help="eos: ± linear strain [0.04]")
+    val.add_argument("-relax", action=argparse.BooleanOptionalAction, default=True,
+                     help="relax positions (fixed cell): eos at each volume, phonon before displacing [on]")
+    val.add_argument("-supercell", default=None, help="phonon: e.g. 4 or 4,4,2 [widths ≥ 10 Å]")
+    val.add_argument("-mesh", type=int, default=16, help="phonon: q-mesh per direction [16]")
+    val.add_argument("-displacement", type=float, default=0.01, help="phonon: Å [0.01]")
+    val.add_argument("-min_width", type=float, default=10.0, help="defect: supercell width in Å [10]")
+    val.add_argument("-surface", default=None, help="defect: Miller indices of the given cell, e.g. 111,100")
+    val.add_argument("-layers", type=int, default=6, help="defect: slab layers [6]")
+    val.add_argument("-ref", default=None, help='DFT numbers to compare, e.g. "V0=11.8,B0=140,Ev_Cu=1.28,gamma_111=1.3"')
+    val.add_argument("-outdir", default="validate", help="[validate]")
+    val.add_argument("-noplot", dest="no_plot", action="store_true", help="skip the figure")
+    val.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
+    val.set_defaults(func=_lazy("mflow.validate", "cmd_validate"))
 
     al = sub.add_parser("al", help="active learning: explore → select → TFlow → import → train",
                         epilog=AL_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)

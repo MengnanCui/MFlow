@@ -80,6 +80,8 @@ def elapsed(seconds: float) -> str:
 
 def num(value: float, digits: int = 2) -> str:
     """Fixed point while it stays readable, scientific once it would blow up the column."""
+    if value is None:
+        return "—"
     return f"{value:.{digits}f}" if abs(value) < 1e5 else f"{value:.3g}"
 
 

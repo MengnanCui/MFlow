@@ -35,6 +35,14 @@ consistency:                   # mflow md run-0 check: energy eV/atom, force eV/
   float64: [1.0e-5, 1.0e-4, 1.0, 1.0e-4]
   float32: [1.0e-3, 2.0e-2, 100.0, 1.0e-2]
 
+validate:                      # mflow validate
+  ref_pass: 0.10               # |model - reference| / |reference|
+  ref_warn: 0.25
+  dimer_jump_eV: 0.05          # MLIP Arena energy-jump (Σ |ΔE| around each extra extremum)
+  dimer_conservation_eV_A: 0.05  # mean |F + dE/dr|
+  dimer_tail_eV: 0.01          # |E(r_max)| — should vanish beyond the cutoff
+  imaginary_THz: 0.1           # frequencies below -this count as imaginary (Γ acoustic noise is smaller)
+
 al:                            # active learning (v0.2)
   trust_lo_eV_A: 0.05          # DP-GEN example window; "auto" replaces lo with Q3 + 1.5 IQR of the
   trust_hi_eV_A: 0.15          #   committee deviation on the training set
