@@ -1,27 +1,28 @@
 # MFlow
 
-单文件机器学习势工具箱（v0.6.0，`mflow.py`，约 1360 行）。功能：静态 MACE 计算、结构弛豫、按标签分类误差，运行时资源监控。
+机器学习势工具箱（v0.7.0，Python 包 `mflow/`，命令 `mflow`）。功能：静态 MACE 计算、结构弛豫、按标签分类误差，运行时资源监控。
 
 计算过程中的**约定、默认和风险点**写在 [`docs/conventions.html`](docs/conventions.html) —— 尤其是能量对齐那一节，看数字之前先看它。
 
 ```bash
-pip install mace-torch ase numpy matplotlib rich
+# 先装和 CUDA 匹配的 torch，再在仓库根目录：
+pip install -e ".[mace]"        # 装好后命令行就有 mflow；也可以 python -m mflow ...
 ```
 
 ## 用法
 
 ```bash
-python mflow.py calc -in data.xyz                        # 默认模型，batch 32
-python mflow.py calc -in data.xyz -model mpa -batch 64   # 换成在线下载的基础模型
-python mflow.py calc -in data.xyz -model ./my.model -prefix mace_
-python mflow.py calc -in data.xyz -ref dft_              # 和 dft_energy/dft_forces 比较
-python mflow.py calc -in data.xyz -group config_type     # 按已有标签把误差拆开
-python mflow.py plot -in data_mace.xyz -ref dft_         # 只重画，不重算
+mflow calc -in data.xyz                        # 默认模型，batch 32
+mflow calc -in data.xyz -model mpa -batch 64   # 换成在线下载的基础模型
+mflow calc -in data.xyz -model ./my.model -prefix mace_
+mflow calc -in data.xyz -ref dft_              # 和 dft_energy/dft_forces 比较
+mflow calc -in data.xyz -group config_type     # 按已有标签把误差拆开
+mflow plot -in data_mace.xyz -ref dft_         # 只重画，不重算
 
-python mflow.py relax -in data.xyz                       # 弛豫：位置+晶胞，fmax 0.05
-python mflow.py relax -in data.xyz -cell none -fmax 0.02 # 固定晶胞，更严
-python mflow.py relax -in data.xyz -nproc 3 -dtype float32   # 3 个 worker 共享一张卡
-python mflow.py relax -in data.xyz -resume               # 接着上次中断的继续
+mflow relax -in data.xyz                       # 弛豫：位置+晶胞，fmax 0.05
+mflow relax -in data.xyz -cell none -fmax 0.02 # 固定晶胞，更严
+mflow relax -in data.xyz -nproc 3 -dtype float32   # 3 个 worker 共享一张卡
+mflow relax -in data.xyz -resume               # 接着上次中断的继续
 ```
 
 参数一律多字母，不用单字母，避免撞车：
@@ -205,7 +206,7 @@ ASE 优化器逐结构串行，并行只能来自进程级：`multiprocessing` �
 
 ## tools/
 
-体系专属的小工具放在 [`tools/`](tools/)，共用 `mflow.py` 的读写、日志和绘图风格。
+体系专属的小工具放在 [`tools/`](tools/)，共用 `mflow` 包的读写、日志和绘图风格。
 目前有 `izo_formation.py`（In–Zn–O 形成能 vs In 比例），用法见 [tools/README.md](tools/README.md)。
 
 ```bash

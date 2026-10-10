@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mflow"
+version = "0.7.0"
+description = "MACE toolkit: evaluation, relaxation, training and LAMMPS molecular dynamics"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "ase>=3.23",
+    "matplotlib",
+    "rich",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+# torch must match your CUDA version: install it first, then `pip install -e .[mace]`
+mace = ["mace-torch==0.3.16"]
+gpu = ["cuequivariance-torch", "nvidia-ml-py"]
+test = ["pytest"]
+
+[project.scripts]
+mflow = "mflow.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mflow*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

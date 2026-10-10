@@ -5,3 +5,5 @@ py.log
 *.png
 *_metrics.json
 *_mace.xyz
+*.egg-info/
+build/

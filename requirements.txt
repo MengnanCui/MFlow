@@ -1,5 +1,6 @@
 numpy
-ase
+ase>=3.23
 matplotlib
 rich
-mace-torch   # only needed for `calc`; install torch matching your CUDA version
+pyyaml
+mace-torch==0.3.16   # install torch matching your CUDA version first; `pip install -e ".[mace]"` does the same

@@ -1,9 +1,9 @@
 # tools/
 
-体系专属的小工具，放不进通用的 `mflow.py`，但自己有用。
+体系专属的小工具，放不进通用的 `mflow` 包，但自己有用。
 
-每个脚本直接从上一级的 `mflow.py` 里 import 读文件、日志、表格、配色和绘图风格
-（`sys.path` 会自己指到仓库根目录），所以**要和 `mflow.py` 放在同一个仓库里跑**，
+每个脚本直接从上一级的 `mflow` 包里 import 读文件、日志、表格、配色和绘图风格
+（`sys.path` 会自己指到仓库根目录），所以**要和 `mflow/` 放在同一个仓库里跑**（或先 `pip install -e .`），
 不能单独拷一个文件走。这样换来的是每个工具只剩它自己那点逻辑。
 
 ---
@@ -33,7 +33,7 @@ python tools/izo_formation.py -in izo_mace.xyz -eZnO zno.xyz -eIn2O3 in2o3.xyz -
 
 | 参数 | 说明 |
 |---|---|
-| `-in` | 输入 xyz（`mflow.py calc` 的输出） |
+| `-in` | 输入 xyz（`mflow calc` 的输出） |
 | `-eZnO` / `-eIn2O3` | 数字按 **eV/化学式单位** 解释；给路径则读该 xyz 并自己除以单元数 |
 | `-muO` | 氧的参考能量 eV/atom。任一结构偏离化学计量而没给它 → 报错退出 |
 | `-prefix` | 指定能量标签，如 `mpa0_`。默认自动挑，`dft_`/`REF_` 这类参考标签排在最后 |

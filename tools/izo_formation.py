@@ -6,7 +6,7 @@ izo_formation.py — formation energy vs In ratio for In-Zn-O, from a MACE-evalu
     E_f = [ E - (n_In/2)*E(In2O3) - n_Zn*E(ZnO) - dn_O*mu_O ] / N_atoms      eV/atom
     x   = n_In / (n_In + n_Zn)
 
-Reading, logging, tables, colours and the plot style all come from mflow.py next door;
+Reading, logging, tables, colours and the plot style all come from the mflow package next door;
 this file only holds what is specific to IZO.
 
     python tools/izo_formation.py -in izo_mace.xyz -eZnO zno_mace.xyz -eIn2O3 in2o3_mace.xyz
@@ -55,7 +55,7 @@ def energy_key(frames: list, prefix: str | None) -> str:
         return key
     found = sorted(k for k in frames[0].info if k == "energy" or k.endswith("_energy"))
     if not found:
-        die("no energy label in the first structure — run `mflow.py calc` first, or pass -prefix")
+        die("no energy label in the first structure — run `mflow calc` first, or pass -prefix")
     # dft_energy / REF_energy are what MACE was compared against, not what MACE produced,
     # so they only win when the file holds nothing else.
     reference_keys = {c + "energy" for c in REF_CANDIDATES}
