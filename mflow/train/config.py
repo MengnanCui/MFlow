@@ -79,7 +79,13 @@ def parse_set(pairs: list[str] | None) -> dict:
         if "=" not in pair:
             raise ValueError(f"-set expects key=value, got {pair!r}")
         key, value = pair.split("=", 1)
-        out[key.strip()] = yaml.safe_load(value)
+        parsed = yaml.safe_load(value)
+        if isinstance(parsed, str):          # YAML 1.1 reads 5e-4 (no dot) as a string
+            try:
+                parsed = float(parsed)
+            except ValueError:
+                pass
+        out[key.strip()] = parsed
     return out
 
 

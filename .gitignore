@@ -7,3 +7,6 @@ py.log
 *_mace.xyz
 *.egg-info/
 build/
+.pytest_cache/
+*.lammpstrj
+log.lammps

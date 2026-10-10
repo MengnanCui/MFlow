@@ -29,7 +29,13 @@ EXAMPLES = """examples
   mflow check -in train.xyz -model mpa -split 0.1   # health + zero-shot + split
   mflow train -in train.xyz -test test.xyz -name cu # fine-tune MACE-MPA-0, watch it, report
   mflow train -in train.xyz -mode multihead -foundation mh1 -name cu -dry
-  mflow train-report -dir cu                        # re-analyse a finished run"""
+  mflow train-report -dir cu                        # re-analyse a finished run
+
+  mflow deploy -model cu/cu.model -head Default     # -> deploy/deploy.json (+ ML-IAP .pt)
+  mflow lmp-check -deploy deploy                    # can this LAMMPS run it?
+  mflow md -in start.xyz -deploy deploy -temp 600 -steps 50000 -outdir md600
+  mflow md -in start.xyz -deploy deploy -ensemble npt -press 1 -outdir npt -dry
+  mflow md-report -dir md600                        # gates, RDF, MSD, figure"""
 
 
 def _lazy(module: str, name: str):
@@ -162,6 +168,62 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
     report.add_argument("-noplot", dest="no_plot", action="store_true", help="skip the figures")
     report.set_defaults(func=_lazy("mflow.train.report", "cmd_train_report"))
+
+    deploy = sub.add_parser("deploy", help="export a model for LAMMPS (ML-IAP) and write deploy.json")
+    deploy.add_argument("-model", required=True, metavar="PATH", help=".model file")
+    deploy.add_argument("-head", default=None, help="head to export (required for multi-head models)")
+    deploy.add_argument("-dtype", default="float32", choices=["float32", "float64"],
+                        help="precision of the exported model [float32; float64 for checks]")
+    deploy.add_argument("-outdir", default="deploy", help="[deploy]")
+    deploy.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
+    deploy.set_defaults(func=_lazy("mflow.lmp.deploy", "cmd_deploy"))
+
+    lmpcheck = sub.add_parser("lmp-check", help="check that LAMMPS can run MACE through ML-IAP + KOKKOS")
+    lmpcheck.add_argument("-lmp", default=None, metavar="PATH", help="lmp executable [$MFLOW_LMP, PATH]")
+    lmpcheck.add_argument("-deploy", default=None, metavar="DIR|JSON", help="also run the exported model")
+    lmpcheck.add_argument("-outdir", default="lmp_check", help="[lmp_check]")
+    lmpcheck.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
+    lmpcheck.set_defaults(func=_lazy("mflow.lmp.probe", "cmd_lmp_check"))
+
+    md = sub.add_parser("md", help="molecular dynamics in LAMMPS with a deployed MACE model",
+                        epilog=EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    md.add_argument("-in", "--input", dest="input", required=True, metavar="FILE", help="start structure")
+    md.add_argument("-index", default="-1", help="which structure of the file [-1]")
+    md.add_argument("-deploy", required=True, metavar="DIR|JSON", help="written by `mflow deploy`")
+    md.add_argument("-ensemble", default="nvt", choices=["nvt", "npt", "nve"], help="[nvt]")
+    md.add_argument("-temp", type=float, default=300.0, help="K; start temperature for nve [300]")
+    md.add_argument("-temp_end", type=float, default=None, help="K, linear ramp to this [= -temp]")
+    md.add_argument("-press", type=float, default=1.0, help="bar, npt only [1]")
+    md.add_argument("-dt", type=float, default=1.0, help="timestep, fs [1]")
+    md.add_argument("-steps", type=int, default=100_000, help="[100000]")
+    md.add_argument("-tdamp", type=float, default=None, help="thermostat damping, fs [100 dt]")
+    md.add_argument("-pdamp", type=float, default=None, help="barostat damping, fs [1000 dt]")
+    md.add_argument("-seed", type=int, default=42, help="velocity seed [42]")
+    md.add_argument("-dump", type=int, default=100, help="dump every N steps [100]")
+    md.add_argument("-thermo", type=int, default=100, help="thermo every N steps [100]")
+    md.add_argument("-restart", type=int, default=10_000, help="restart file every N steps [10000]")
+    md.add_argument("-ngpu", type=int, default=1, help="GPUs = MPI ranks (Kokkos domain decomposition) [1]")
+    md.add_argument("-lmp", default=None, metavar="PATH", help="lmp executable [$MFLOW_LMP, PATH]")
+    md.add_argument("-outdir", default="md", help="run directory [md]")
+    md.add_argument("-skip", type=float, default=0.2, help="equilibration fraction left out of the gates [0.2]")
+    md.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
+    md.add_argument("-nocheck", action="store_true", help="skip the run-0 consistency check")
+    md.add_argument("-dry", action="store_true", help="write the inputs only")
+    md.add_argument("-resume", action="store_true", help="continue from the newest restart file")
+    md.add_argument("-force", action="store_true", help="run even if a check failed")
+    md.add_argument("-noplot", dest="no_plot", action="store_true", help="skip the figure")
+    md.set_defaults(func=_lazy("mflow.lmp.run", "cmd_md"))
+
+    mdrep = sub.add_parser("md-report", help="quality gates, thermodynamics, RDF and MSD of an MD run")
+    mdrep.add_argument("-dir", required=True, help="run directory (mflow md, or any dir with log.lammps)")
+    mdrep.add_argument("-ensemble", default=None, choices=["nvt", "npt", "nve"], help="[from md.json]")
+    mdrep.add_argument("-temp", type=float, default=None, help="target K [from md.json]")
+    mdrep.add_argument("-skip", type=float, default=0.2, help="equilibration fraction [0.2]")
+    mdrep.add_argument("-stride", type=int, default=1, help="read every N-th dump frame [1]")
+    mdrep.add_argument("-ref", default=None, metavar="FILE", help="reference trajectory (AIMD) for the RDF")
+    mdrep.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
+    mdrep.add_argument("-noplot", dest="no_plot", action="store_true", help="skip the figure")
+    mdrep.set_defaults(func=_lazy("mflow.analysis.report", "cmd_md_report"))
 
     plot = sub.add_parser("plot", parents=[common, compare], help="re-analyse an evaluated file")
     plot.add_argument("-pred", dest="pred_prefix", default="mpa0_", metavar="PREFIX",
