@@ -117,3 +117,23 @@ def test_two_round_campaign(tmp_path, monkeypatch):
     assert steps[:6] == ["init", "explore", "select", "export", "import", "train"]
     assert cmd_al_status(Namespace(name="camp")) == 0
     assert (tmp_path / "camp" / "status.json").exists()
+
+
+def test_minhop_explorer_finds_minima_of_a_cluster(tmp_path):
+    from ase import Atoms
+    from mflow.al.explore import explore_minhop
+    rng, pos = np.random.default_rng(0), []
+    while len(pos) < 8:                                       # random, loosely packed Cu8: not a minimum
+        p = rng.uniform(0, 5, 3)
+        if all(np.linalg.norm(p - q) > 2.3 for q in pos):
+            pos.append(p)
+    a = Atoms("Cu8", positions=pos)
+    a.center(vacuum=6.0)
+    out = explore_minhop([a], {"steps": 4, "T0": 1000.0, "fmax": 0.05}, "unused", tmp_path, calc=EMT())
+    minima = [x for x in out if x.info["mflow_source"] == "minhop_min"]
+    assert len(minima) >= 2                                   # the start minimum and at least one new one
+    energies = sorted({round(x.info["mflow_E_explore"], 3) for x in minima})
+    assert len(energies) >= 2
+    assert any(x.info["mflow_source"] == "minhop_md" for x in out)
+    assert all(x.calc is None for x in out)
+    assert (tmp_path / "minhop_0" / "hop.log").exists()      # ASE's files stay out of the caller's cwd

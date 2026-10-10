@@ -131,34 +131,54 @@ def explore_md_lammps(system: list, cfg: dict, deploy: str, round_: int, workdir
 #  minima hopping
 # ============================================================================ #
 
-def explore_minhop(system: list, cfg: dict, model: str, workdir: Path) -> list:
-    """ASE's MinimaHopping (fixed cell). Writes its files in its own directory, so each start gets one."""
+def explore_minhop(system: list, cfg: dict, model: str, workdir: Path, calc=None) -> list:
+    """
+    ASE's MinimaHopping (fixed cell). It writes its files into the working directory, so each
+    start structure gets its own. Every local minimum it reaches is kept (qn*.traj, last frame),
+    not only the accepted ones in minima.traj: a rejected minimum is just as new to the model.
+    Plus every 10th frame of the MD escapes between them.
+    """
     from ase.optimize.minimahopping import MinimaHopping
 
-    calc = build_calculator(model, pick_device("auto"), "float64", None)
+    calc = calc or build_calculator(model, pick_device("auto"), "float64", None)
     out = []
     cwd = os.getcwd()
     for si, start in enumerate(system):
         d = workdir / f"minhop_{si}"
         d.mkdir(parents=True, exist_ok=True)
         os.chdir(d)
+        minima, md = [], []
         try:
             a = bare(start)
             a.calc = calc
             hop = MinimaHopping(a, T0=float(cfg.get("T0", 1000.0)), fmax=float(cfg.get("fmax", 0.05)))
             hop(totalsteps=int(cfg.get("steps", 20)))
-            minima = ase.io.read("minima.traj", ":") if Path("minima.traj").exists() else []
-            md = []
-            for f in sorted(Path(".").glob("md*.traj")):
-                md += ase.io.read(f, "::10")
         except Exception as exc:
             LOG(f"[warn]minima hopping from start {si} stopped: {type(exc).__name__}: {exc}[/warn]")
-            minima, md = [], []
         finally:
-            os.chdir(cwd)
-        out += tag([bare(m) for m in minima], mflow_source="minhop_min", mflow_start=si)
+            try:
+                for f in sorted(Path(".").glob("qn*.traj")):
+                    m = ase.io.read(f, -1)
+                    m.info["mflow_E_explore"] = float(m.get_potential_energy())
+                    minima.append(m)
+                for f in sorted(Path(".").glob("md*.traj")):
+                    md += ase.io.read(f, "::10")
+            finally:
+                os.chdir(cwd)
+        energies = [m.info["mflow_E_explore"] for m in minima]
+        distinct = len({round(e, 3) for e in energies})
+        out += tag([_keep(m, "mflow_E_explore") for m in minima], mflow_source="minhop_min", mflow_start=si)
         out += tag([bare(m) for m in md], mflow_source="minhop_md", mflow_start=si)
+        if energies:
+            LOG(f"minhop start {si}: {len(minima)} local minima ({distinct} distinct energies, "
+                f"lowest {min(energies):.3f} eV), {len(md)} MD frames")
     LOG(f"minhop: {len(out)} structures (minima + MD between them)")
+    return out
+
+
+def _keep(atoms: Atoms, *keys) -> Atoms:
+    out = bare(atoms)
+    out.info.update({k: atoms.info[k] for k in keys if k in atoms.info})
     return out
 
 
