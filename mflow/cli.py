@@ -38,6 +38,15 @@ EXAMPLES = """examples
   mflow md-report -dir md600                        # gates, RDF, MSD, figure"""
 
 
+AL_EXAMPLES = """examples
+  mflow al init -name cu_al -system start.xyz -data dft.xyz -test test.xyz -foundation mpa
+  mflow al run -name cu_al                    # round 0: explore with the foundation model, FPS, export
+  #   ... label round_00/export/candidates.extxyz with TFlow (commands in round_00/export/README.txt) ...
+  mflow al import -name cu_al -tflow /path/to/calc_dir
+  mflow al run -name cu_al                    # train committee → explore → select → export (next round)
+  mflow al status -name cu_al                 # ledger + stopping criteria"""
+
+
 def _lazy(module: str, name: str):
     """The command is imported only when it runs, so `mflow -h` never pays for torch."""
     def run(args):
@@ -230,6 +239,45 @@ def build_parser() -> argparse.ArgumentParser:
     mdrep.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
     mdrep.add_argument("-noplot", dest="no_plot", action="store_true", help="skip the figure")
     mdrep.set_defaults(func=_lazy("mflow.analysis.report", "cmd_md_report"))
+
+    al = sub.add_parser("al", help="active learning: explore → select → TFlow → import → train",
+                        epilog=AL_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    alsub = al.add_subparsers(dest="al_command", required=True)
+    al_name = argparse.ArgumentParser(add_help=False)
+    al_name.add_argument("-name", required=True, help="campaign directory")
+    al_name.add_argument("-log", default="py.log", metavar="FILE", help="log file [py.log]")
+    al_round = argparse.ArgumentParser(add_help=False)
+    al_round.add_argument("-round", type=int, default=None, help="[current round from state.json]")
+
+    p_init = alsub.add_parser("init", parents=[al_name], help="create a campaign")
+    p_init.add_argument("-system", required=True, metavar="FILE", help="start structure(s) for exploration")
+    p_init.add_argument("-data", default=None, metavar="FILE", help="labelled data you already have")
+    p_init.add_argument("-test", default=None, metavar="FILE", help="fixed test set")
+    p_init.add_argument("-foundation", default="mpa", help="[mpa]")
+    p_init.add_argument("-mode", default="finetune", choices=MODES, help="[finetune]")
+    p_init.add_argument("-committee", type=int, default=4, help="[4]")
+    p_init.add_argument("-engine", default="ase", choices=["ase", "lammps"], help="MD explorer engine [ase]")
+    p_init.add_argument("-force", action="store_true", help="overwrite campaign.yaml")
+    p_init.set_defaults(func=_lazy("mflow.al.campaign", "cmd_al_init"))
+    for name, fn, hlp in (("explore", "cmd_al_explore", "run the explorers of campaign.yaml"),
+                          ("select", "cmd_al_select", "committee scoring + trust window + FPS"),
+                          ("export", "cmd_al_export", "write candidates + TFlow run script"),
+                          ("train", "cmd_al_train", "train the committee on the current dataset")):
+        sp = alsub.add_parser(name, parents=[al_name, al_round], help=hlp)
+        if name == "explore":
+            sp.add_argument("-lmp", default=None, metavar="PATH", help="lmp executable (engine lammps)")
+        sp.set_defaults(func=_lazy("mflow.al.commands", fn))
+    p_imp = alsub.add_parser("import", parents=[al_name, al_round], help="read DFT labels back")
+    p_imp.add_argument("-tflow", default=None, metavar="CALC_DIR", help="TFlow calc dir (job_map.json)")
+    p_imp.add_argument("-in", dest="labelled", default=None, metavar="FILE",
+                       help="or: labelled extxyz carrying mflow_id")
+    p_imp.set_defaults(func=_lazy("mflow.al.commands", "cmd_al_import"))
+    p_st = alsub.add_parser("status", parents=[al_name], help="ledger + stopping criteria")
+    p_st.set_defaults(func=_lazy("mflow.al.commands", "cmd_al_status"))
+    p_run = alsub.add_parser("run", parents=[al_name], help="advance to the next DFT hand-off")
+    p_run.add_argument("-lmp", default=None, metavar="PATH", help="lmp executable (engine lammps)")
+    p_run.add_argument("-force", action="store_true", help="keep going even if the stopping criteria are met")
+    p_run.set_defaults(func=_lazy("mflow.al.commands", "cmd_al_run"))
 
     plot = sub.add_parser("plot", parents=[common, compare], help="re-analyse an evaluated file")
     plot.add_argument("-pred", dest="pred_prefix", default="mpa0_", metavar="PREFIX",
