@@ -1,7 +1,7 @@
 # MFlow
 
 **MACE 势函数的一条龙工具：训练 → 评估 → 推理 → LAMMPS 动力学 → 质量判定。**
-当前版本 **v0.2.0a1**（Python 包 `mflow/`，命令 `mflow`）：v0.1 的训练/推理/MD 之上，加了委员会训练与不确定度校准、主动学习闭环（接 TFlow）、`validate` 静态性质、LAMMPS 协议库。设计与依据见 [v0.2 路线图](docs/roadmap-v0.2.md)。
+当前版本 **v0.3.0**（Python 包 `mflow/`，命令 `mflow`）：v0.1 的训练/推理/MD 之上，加了委员会训练与不确定度校准、主动学习闭环（接 TFlow）、`validate` 静态性质、LAMMPS 协议库；v0.3 补齐主动学习的分级收敛判据、无委员会模式、分区探索、覆盖度、性质探针和新探索器。设计与依据见 [v0.2 路线图](docs/roadmap-v0.2.md) 和 [主动学习调研](docs/research-al-2026-10.md)。
 
 两条设计原则：
 
@@ -168,9 +168,10 @@ mflow md -in start.xyz -deploy deploy -protocol equilibrate -temp 600 -steps 200
 | 你想… | 命令 | 你会得到 | 验证 |
 |---|---|---|---|
 | 开一个活动 | `mflow al init -name camp -system start.xyz -data dft.xyz -test test.xyz` | `campaign.yaml`、台账 | 🧪 |
-| 自动走到"需要 DFT"为止 | `mflow al run -name camp` | 探索（MD / 微扰 / 极小值跳跃）→ 委员会筛选 → 导出给 TFlow 的文件和命令 | 🧪 |
+| 自动走到"需要 DFT"为止 | `mflow al run -name camp` | 探索（MD / 微扰 / 极小值跳跃 / 升温淬火 / 随机结构搜索 / 不确定度偏置 MD / PLUMED）→ 筛选（委员会，或单模型 + 描述子距离 / QUESTS）→ 导出给 TFlow 的文件和命令 | 🧪 |
 | 把 TFlow 的结果收回来 | `mflow al import -name camp -tflow <calc_dir>` | 合格的标注进数据集；不合格的（SCF 不收敛、错误修复改过结构……）列出原因 | 🧪 |
-| 看进度、要不要停 | `mflow al status -name camp` | 每轮的探索/候选/标注数、新帧误差、停止判据 | 🧪 |
+| 看进度、要不要停 | `mflow al status -name camp` | 每轮的探索/候选/标注数、新帧误差；分级收敛判据（L1 每轮 / L2 整体 / 预算），`status.json` 里 `verdict` = converged / continue / budget_exhausted | 🧪 |
+| 性质跨轮稳不稳 | `mflow al probe -name camp` | 每个模型算 EOS / dimer / 声子，和上一轮、成员之间比 | 🧪 |
 
 ### 让 agent 帮你做
 
@@ -499,7 +500,7 @@ E0 alignment (fit), eV per atom of element: O -0.2076 · Si +0.3542
 mflow calc -in md_frames.xyz -model s1.model,s2.model,s3.model -prefix com_
 ```
 
-- **委员会怎么组。** `mflow train -committee 4` 一键训练 4 个成员：每个成员换 seed，微调时默认再做 **bagging**（每个成员随机用 80 % 的训练集）。原因：从同一个基础模型微调出来的成员起点相同，只换 seed 时彼此高度相关，σ 会严重偏小。输出 `committee.json` 和 `<name>_committee_report.json`（测试集上的误差 + 校准）。
+- **委员会怎么组。** `mflow train -committee 4` 一键训练 4 个成员：每个成员换 seed，微调时默认再做 **bagging**（每个成员随机用 80 % 的训练集）。原因：从同一个基础模型微调出来的成员起点相同，只换 seed 时彼此高度相关，σ 会严重偏小。更有效的是让成员从不同基础模型出发：`-foundations mpa,omat`（r_max 须相同）。输出 `committee.json` 和 `<name>_committee_report.json`（测试集上的误差 + 校准）；RMS(误差)/RMS(σ) ≥ 3 时报告标 **COLLAPSED**（委员会塌缩）。
 - **主动学习看什么。** 看 `com_Fdev_max`，即每个结构里最大的原子力偏差。`metrics.json` 的 `committee` 段给出它的分布。DP-GEN 惯用的信任窗口是 0.05–0.15 eV/Å：
   - 低于下限：模型已经会了；
   - 高于上限：多半是不物理的结构；
@@ -695,7 +696,8 @@ mflow al run    -name cu_al                 # 第 0 轮：基础模型探索 →
 #   …… 在 TFlow 里算 round_00/export/candidates.extxyz（命令写在 round_00/export/README.txt）……
 mflow al import -name cu_al -tflow /path/to/calc_dir
 mflow al run    -name cu_al                 # 训练委员会 → 探索 → 委员会筛选 → 导出（下一轮），再停下
-mflow al status -name cu_al                 # 台账 + 停止判据
+mflow al status -name cu_al                 # 台账 + 分级收敛判据
+mflow al probe  -name cu_al                 # 性质探针（campaign.yaml 的 probes），train 之后 al run 也会自动跑
 ```
 
 每一步也能单独跑：`al explore / select / export / import / train`。`al run` 走到"需要 DFT"时一定停下（人工闸门）。
@@ -709,7 +711,7 @@ mflow al status -name cu_al                 # 台账 + 停止判据
 | 导出 | `round_NN/export/candidates.extxyz`（只有几何和 `mflow_id`）、`run_label.py`（给 `vaspctl submit --src-run` 的单点脚本）、`manifest.json`、`README.txt`（四条命令） | `run_label.py` 里的 INCAR：**整个活动保持一致**，并和基础模型的 DFT 设置对齐 |
 | 收回 | 读 TFlow 的 `job_map.json`，按 `info.mflow_id` 对回去，解析 `static/OUTCAR`；**拒收**：状态不是 done、跑过 error fix（`error_job_*`、KPOINTS 被改）、SCF 步数达到 NELM（TFlow 对 static 不查这个）、结构被改过、OUTCAR 读不了；再过一遍 `check` 的规则（NaN、力过大、原子过近）。拒收原因写 `rejects.jsonl` | `-tflow <calc_dir>`，或 `-in labelled.xyz`（任何带 `mflow_id` 和参考标签的 extxyz） |
 | 训练 | 数据集**每轮重建**（initial + 所有已标注轮次），测试集固定；委员会 `train -committee N`（bagging），记下 Spearman 和 σ 比值 | `train` |
-| 判断 | `al status`：候选比例 < 5 %；**新帧误差**（这一轮 DFT 刚算、模型没见过的帧）能量 < 10 meV/atom、力 < 50 meV/Å。都满足才建议停，然后还要跑生产 MD 看闸门 | `stop`，或 `thresholds.yaml` 的 `al` 段 |
+| 判断 | `al status`：分级收敛判据，见 4.4。v0.2 的三条（候选比例 < 5 %；**新帧误差**能量 < 10 meV/atom、力 < 50 meV/Å）仍是必要条件。收敛后还要跑生产 MD 看闸门 | `stop`，或 `thresholds.yaml` 的 `al` 段 |
 
 `ledger.jsonl` 只追加：每一步的设置、数量、模型、误差都记在里面；`state.json` 是当前轮次和阶段。
 
@@ -727,12 +729,64 @@ mflow al import -name cu_al -tflow <calc_dir>
 
 ### 4.3 方案怎么选
 
-依据见[路线图第 1 节](docs/roadmap-v0.2.md#1-训练方案全景来自-20242026-年的综述)（Kulichenko 2024 *Chem. Rev.*、Grasselli 2025、Tompa 2026 等）。经验写在 [`mflow-active-learning-campaign`](skills/mflow-active-learning-campaign/SKILL.md)：
+依据见[路线图第 1 节](docs/roadmap-v0.2.md#1-训练方案全景来自-20242026-年的综述)和 [主动学习调研](docs/research-al-2026-10.md)。经验写在 [`mflow-active-learning-campaign`](skills/mflow-active-learning-campaign/SKILL.md)：
 
-- 体相、液体：`md` 网格 + `perturb`；团簇、表面：加 `minhop`。
-- 委员会 ≥ 3，建议 4；微调时保持 bagging。
-- `trust: fixed` 起步；委员会校准好（Spearman ≥ 0.5）后再试 `auto`。
-- 一轮 50–150 个结构；连续两轮候选比例不降，说明探索不够（加温度、加步数、开 minhop），而不是模型够好了。
+- 体相、液体：`md` 网格 + `perturb`；团簇、表面：加 `minhop`；未知结构：加 `rss`；非晶：加 `heatquench`。
+- **委员会不是必需的。** 从同一个基础模型微调出的成员容易"塌缩"（分歧远小于真实误差）。默认仍是 4 个成员；`train.committee: 1` 时只训一个模型，筛选改用描述子距离（或 QUESTS）。
+- 用委员会时：微调保持 bagging；最有效的多样性来源是不同基础模型（`train.foundations`）；`al status` / 训练报告里出现 COLLAPSED 时，别只靠委员会分歧选帧。
+- `trust: fixed` 起步；不知道误差下限（微调基础模型时常见）用 `adaptive-lower`。
+- 一轮 50–150 个结构；连续两轮候选比例不降，说明探索不够（加温度、加步数、开 minhop / rss），而不是模型够好了。
+
+### 4.4 v0.3：收敛判据、无委员会模式、分区、覆盖度、探针
+
+**全部可选，默认行为和 v0.2 相同**（唯一变化：`al status` 多了几行判据，数据不足的行显示 n/a、不阻塞）。在 `campaign.yaml` 里打开：
+
+```yaml
+train:
+  committee: 4                 # 1 = 单模型，不训委员会
+  foundations: [mpa, omat]     # 可选：成员 k 用 foundations[k % n]（r_max 必须相同）
+  member_set:                  # 可选：逐成员追加 mace_run_train 选项，手动控制差异
+    - [subselect_pt=fps]
+    - [subselect_pt=random]
+select:
+  uncertainty: auto            # auto | committee | descriptor | quests | none（auto：≥2 个模型用委员会，否则描述子距离）
+  trust: adaptive-lower        # fixed | auto | relative | adaptive-lower（dpgen2）
+  coverage: auto               # 每轮记录分布外比例：auto（有 quests 用 QUESTS，否则描述子）| quests | descriptor | off
+explore:
+  md:
+    regions:                   # DP-GEN 式分区：前一个区通过 L1 才进入下一个；MD 步数每轮 × grow
+      - {name: cold, temps: [100, 300], steps: 1000, grow: 2.0, max_steps: 8000}
+      - {name: hot,  temps: [600, 900], steps: 1000, grow: 2.0, max_steps: 8000}
+    drivers: 1                 # 1 | N | all：委员会前 N 个成员各自驱动 MD
+  heatquench: {enabled: true, T_high: 2000, T_low: 300, steps_hot: 1000, steps_quench: 2000}
+  rss: {enabled: false, n: 20}                 # 随机结构搜索（周期体系）
+  ubmd: {enabled: false, kappa: 0.5}           # 不确定度偏置 MD，需 ≥2 个模型
+  plumed: {enabled: false, file: plumed.dat, temps: [300], steps: 10000}   # LAMMPS fix plumed
+stop:
+  max_rounds: 15               # 预算：到了就停，状态写"budget exhausted — NOT converged"
+  max_dft: 3000
+probes:                        # 每次训练后算，跨轮比较
+  - {kind: eos, index: 0}
+  - {kind: dimer, elements: [Cu]}
+  - {kind: phonon, index: 0, supercell: [3, 3, 3]}
+```
+
+**分级收敛判据**（阈值在 `thresholds.yaml` 的 `al` 段；`al status` 的 source 列标出文献值 lit / 建议值 sug）：
+
+| 级别 | 判据 | 默认 |
+|---|---|---|
+| L0 | `adaptive-lower`：lo 随探索帧的偏差分布走，连续 2 轮变化 < 0.05 eV/Å 后冻结，hi = lo + 0.15 | dpgen2 |
+| L1 每轮 / 每区 | accurate ≥ 99 %、failed ≤ 0.1 %，**连续 2 轮** | DP-GEN |
+| | FPS 后剩下的帧 < max(10, 0.1 % × 探索帧) | 建议 |
+| | 候选比例 < 5 %；新帧误差 E < 10 meV/atom、F < 50 meV/Å | v0.2 |
+| | 新帧力误差 ≤ 1.5 × 测试集力误差 | 建议 |
+| | 探索 MD 全部跑完，没有崩（异常、原子 < 0.5 Å） | 建议 |
+| L2 整体 | 探针性质连续 2 轮在容差内（V0 0.5 %、B0 5 %、r_eq 0.02 Å、阱深 0.02 eV、声子最高频 0.2 THz、无虚频、短程墙完好） | 建议 |
+| | 成员之间探针性质的散布在容差内 | 建议 |
+| | 分布外比例（QUESTS dH > 0 或描述子 OOD）≤ 1 % | 建议 |
+| 预算 | `max_rounds` / `max_dft` | 你定 |
+
+**不确定度的几种来源**：委员会力偏差（DP-GEN）；描述子距离（到最近训练帧，阈值 = 训练集自身留一最近邻距离的 99 % 分位）；QUESTS dH > 0（无需校准，`pip install quests`）。委员会模式下 `select` 记录还会给出去掉驱动成员后的分歧 `dev_median_wo_driver`。
 
 ---
 
@@ -816,7 +870,8 @@ agent 汇报时每个数字都应带出处（哪个 JSON 的哪个字段）；�
 | 版本 | 内容 |
 |---|---|
 | v0.1 | 包结构；`check` / `train` / `train-report`；`calc`（含委员会）/ `relax` / `plot`；`deploy` / `lmp-check` / `md` / `md-report`；3 个流程类 skill |
-| **v0.2.0a1（当前）** | a：`train -committee`（bagging）、不确定度校准、力误差按元素、`thresholds.yaml`；b：`mflow al` 主动学习闭环 + TFlow 对接；c：极小值跳跃探索；d：`validate`（dimer/eos/phonon/defect）、LAMMPS 协议库（恒温器/恒压器、equilibrate/transport/anneal/quench/minimize/melt）、`md-report` 统计（分块误差、平衡检验、扩散区、VDOS、Yeh–Hummer）；e：9 个经验类 skill。打包：`mflow doctor` / `config` / `skills` / `tool` / `completion`、`install.sh`。64 个测试。**尚未在 GPU + 真实 MACE/LAMMPS 上做端到端验证**（测试用 EMT / LJ / EAM 代替） |
+| **v0.3.0（当前）** | 主动学习：分级收敛判据（L0 adaptive-lower / L1 每轮每区 / L2 探针与覆盖度 / 预算）；单模型主动学习（描述子距离 / QUESTS）；委员会选项（混合基础模型、逐成员参数、塌缩检测、去驱动成员分歧）；DP-GEN 式分区探索、多驱动 MD；新探索器：升温淬火、随机结构搜索、不确定度偏置 MD、PLUMED（`md -plumed`）；`al probe`。82 个测试（含两个 CPU 上的 MACE 端到端活动） |
+| v0.2.0a1 | a：`train -committee`（bagging）、不确定度校准、力误差按元素、`thresholds.yaml`；b：`mflow al` 主动学习闭环 + TFlow 对接；c：极小值跳跃探索；d：`validate`（dimer/eos/phonon/defect）、LAMMPS 协议库（恒温器/恒压器、equilibrate/transport/anneal/quench/minimize/melt）、`md-report` 统计（分块误差、平衡检验、扩散区、VDOS、Yeh–Hummer）；e：9 个经验类 skill。打包：`mflow doctor` / `config` / `skills` / `tool` / `completion`、`install.sh`。64 个测试。**尚未在 GPU + 真实 MACE/LAMMPS 上做端到端验证**（测试用 EMT / LJ / EAM 代替） |
 | 以后 | 随机结构搜索探索、多头委员会（MACE PR #800 合并后）、不确定度偏置 MD、PLUMED 增强采样模板、集群提交，见路线图 |
 
 v0.1 之前是单文件脚本 `mflow.py`（内部版本 0.2–0.6，只有 calc/relax/plot），现已并入当前的包，计算结果逐位一致。
@@ -830,7 +885,7 @@ v0.1 之前是单文件脚本 `mflow.py`（内部版本 0.2–0.6，只有 calc/
 | 命令 | 必填 | 常用选项 |
 |---|---|---|
 | `check` | `-in` | `-model` `-head` `-test` `-split` `-seed` `-ref` `-group` `-outdir` |
-| `train` | `-in` `-name` | `-test` `-valid` `-mode finetune\|multihead\|lora\|scratch` `-foundation` `-head` `-pt` `-epochs` `-batch` `-committee` `-bagging` `-set k=v …` `-dry` `-resume` `-force` |
+| `train` | `-in` `-name` | `-test` `-valid` `-mode finetune\|multihead\|lora\|scratch` `-foundation` `-head` `-pt` `-epochs` `-batch` `-committee` `-bagging` `-foundations a,b` `-set k=v …` `-dry` `-resume` `-force` |
 | `train-report` | `-dir` | `-test` `-group` |
 | `calc` | `-in` | `-model a[,b,c]` `-head` `-ref` `-e0 fit\|mean\|none\|file.json` `-group` `-prefix` `-batch` `-dtype` |
 | `relax` | `-in` | `-model` `-fmax` `-steps` `-opt` `-cell full\|none` `-nproc` `-traj` `-resume` |
@@ -838,11 +893,11 @@ v0.1 之前是单文件脚本 `mflow.py`（内部版本 0.2–0.6，只有 calc/
 | `validate` | `dimer\|eos\|phonon\|defect` | `-model` `-in` `-elements` `-ref "k=v,…"` `-strain` `-supercell` `-mesh` `-surface` `-min_width` `-outdir` |
 | `deploy` | `-model` | `-head` `-dtype float32\|float64` `-outdir` |
 | `lmp-check` | — | `-lmp` `-deploy` |
-| `md` | `-in` `-deploy` | `-protocol` `-ensemble` `-thermostat` `-baro` `-temp` `-temp_end` `-press` `-dt` `-steps` `-dump` `-melt_temp` `-fmax` `-seed` `-ngpu` `-outdir` `-dry` `-resume` |
+| `md` | `-in` `-deploy` | `-protocol` `-ensemble` `-thermostat` `-baro` `-temp` `-temp_end` `-press` `-dt` `-steps` `-dump` `-melt_temp` `-fmax` `-plumed FILE` `-seed` `-ngpu` `-outdir` `-dry` `-resume` |
 | `md-report` | `-dir` | `-skip` `-stride` `-ref aimd.xyz` `-viscosity` |
-| `al init` | `-name` `-system` | `-data` `-test` `-foundation` `-mode` `-committee` `-engine ase\|lammps` |
+| `al init` | `-name` `-system` | `-data` `-test` `-foundation` `-mode` `-committee`（1 = 单模型）`-engine ase\|lammps` |
 | `al run` | `-name` | `-lmp` `-force` |
-| `al explore / select / export / train` | `-name` | `-round` |
+| `al explore / select / export / train / probe` | `-name` | `-round` |
 | `al import` | `-name` + `-tflow DIR` 或 `-in FILE` | `-round` |
 | `al status` | `-name` | |
 | `doctor` | — | `-lmp PATH`（检查这个 LAMMPS 的编译）`-full` `-json FILE` |
@@ -899,8 +954,8 @@ MACE 的 ML-IAP 路线需要自己编译的 KOKKOS(CUDA) + ML-IAP + PYTHON 版�
 - 在 LAMMPS 里实时计算 MACE 的不确定度（上游不支持；委员会打分在 MD 之后离线做）。
 
 **还没实现：**
-- 主动学习：随机结构搜索探索、QUESTS 信息熵去重与停止判据、不确定度偏置 MD、多头委员会。
-- 性质：弹性常数、Arrhenius 自动拟合、离子电导（Nernst–Einstein）、热导、增强采样（PLUMED）。
+- 主动学习：多头委员会（冻结骨架、只训读出头；上游 PR 未合并）、LLPR 等单模型不确定度、遗传算法探索。
+- 性质：弹性常数、Arrhenius 自动拟合、离子电导（Nernst–Einstein）、热导。PLUMED 只接了 `fix plumed`，集体变量要自己写 PLUMED 输入。
 - 大批量 GPU 弛豫（torch-sim）。
 
 **已知限制：**

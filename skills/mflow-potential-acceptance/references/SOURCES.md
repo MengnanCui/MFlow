@@ -18,7 +18,7 @@ MFlow's own (thresholds.yaml, tested in this repository) are not listed.
 - Fu et al., arXiv:2210.07237 — force accuracy does not imply MD stability
 - LAMBench — NVE drift tolerance 5e-4 eV/atom/ps
 - MLIP Arena, mlip_arena/flows/diatomics.py @6239aea — dimer grid and metrics
-- Zeng et al., *Deep Potentials for Materials Science*, arXiv:2203.00393 — practical guide, Table I (trust windows, accurate-ratio rule, ~100 labels/iteration)
+- Wen et al., *Deep Potentials for Materials Science*, Mater. Futures 1, 022601 (2022), arXiv:2203.00393 — practical guide, Table I (trust windows, accurate-ratio rule, ~100 labels/iteration)
 
 ## Caveats
 

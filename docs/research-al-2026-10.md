@@ -76,7 +76,7 @@
    - 但 random 子选是否随 `--seed` 变化 **[未证实]**，实现时要测试。
 4. 冻结骨架、随机初始化读出层（`--freeze N`），或采用 PR #800 的多头委员会。
 
-**塌缩检测**：每轮在 20–50 个新标注的帧上计算 Spearman ρ（预测分歧 vs 真实力误差），以及 sigma_ratio = 分歧 ÷ RMSE。sigma_ratio 远小于 1（例如 < 0.3，建议值）就是塌缩，应加入异构成员。MFlow 的 `train_committee` 已经输出 `spearman_atom` 和 `sigma_ratio`（`mflow/al/commands.py` 的 `step_train`），只差一条明确的“塌缩”告警和对应处理。
+**塌缩检测**：每轮在 20–50 个新标注的帧上计算 Spearman ρ（预测分歧 vs 真实力误差），以及分歧 ÷ RMSE。这个比值远小于 1（例如 < 0.3，建议值）就是塌缩，应加入异构成员。注意 MFlow 的 `sigma_ratio` 定义相反（RMS(误差)/RMS(σ)），所以对应 `sigma_ratio` ≥ 3；v0.3 起由 `uq.collapse_ratio` 判定并标 COLLAPSED。
 
 ### 2.3 单模型 UQ（廉价替代或补充）
 
@@ -111,8 +111,8 @@
 | 滑动平均阈值 + 预算 | aims-PAX arXiv:2508.12888 | 阈值 δt = (1+c)·最近 400 个不确定度的均值，c ∈ [−0.1, 0.1]；达到预算（100–1000 个结构）或验证 MAE 目标时停止 |
 | 误差 vs DFT 次数 | autoplex, Nat. Commun. 16, 7666 (2025) | 每轮 100 个单点计算，目标 10 meV/atom，凭人眼判断平台 |
 | 稳定性 | Fu et al., “Forces are not enough”, arXiv:2210.07237 | 力误差低不代表模拟可靠，关键指标是模拟能跑多久不崩。失效的定义：密度离开 0.2–2.0 g/cm³ 或键伸长 > 0.5 Å（arXiv:2409.05590）；100 ps NVT 中出现温度尖峰（MLIPAudit, arXiv:2511.20487） |
-| 性质跨轮稳定 | arXiv:2601.16047 | 扩散系数到第 4 轮才与参考一致，且随轮次**非单调**变化，所以要求连续多轮稳定 |
-| 覆盖度 | QUESTS | δH > 0 表示新环境在训练集之外（无需校准）；数据增长后熵会饱和，剩余“信息差”与力误差相关（r = 0.89）；论文没给停止阈值 |
+| 性质跨轮稳定 | arXiv:2601.16047 | 部分：eos / dimer / phonon 探针；密度、RDF、D 的跨轮比较尚未做 | 扩散系数到第 4 轮才与参考一致，且随轮次**非单调**变化，所以要求连续多轮稳定 |
+| 覆盖度 | QUESTS | ✅ | δH > 0 表示新环境在训练集之外（无需校准）；数据增长后熵会饱和，剩余“信息差”与力误差相关（r = 0.89）；论文没给停止阈值 |
 | 性质验证 | Morrow, Gardner, Deringer, arXiv:2211.12484；MLIP Arena arXiv:2509.20630；LAMBench arXiv:2504.19578 | 主动学习结束后测 EOS、弹性常数、缺陷、声子、dimer 曲线 |
 
 **first-seen 误差**：用当前模型（重训之前）在本轮新标注帧上算误差。这些帧按构造就是最难的，所以这是最诚实的误差估计。它是常见做法，但没找到把它定为停止规则的正式文献 **[未证实为具名判据]**。MFlow 已在 `fresh_frame_error` 中实现。
@@ -214,16 +214,16 @@ MFlow v0.2 已有：
 - validate（dimer / EOS / 声子 / 缺陷）；
 - md-report（块平均、扩散、VDOS）。
 
-建议按以下优先级补齐（**本报告只提建议，尚未实现**）：
+建议按以下优先级补齐（**v0.3.0 已实现，见最右列**；用法见 README 4.4）：
 
-| 优先级 | 内容 | 改动位置 | 依据 |
-|---|---|---|---|
-| 1 | **收敛判据升级**：加入连续 N 轮、failed 比例、MD 稳定性门、DFT 预算 / 最大轮数硬停止（标记“未收敛”）；信任窗口增加 `adaptive-lower` 模式 | `mflow/al/commands.py` 的 `stop_criteria`；`mflow/al/select.py` 的 `trust_window`；`thresholds.yaml` 的 `al` 段 | dpgen2、DP-GEN、Fu 2023 |
-| 2 | **委员会多样性**：每个成员用不同的 replay 子集；允许混合 foundation（检查 r_max）；sigma_ratio < 0.3 时明确判为“塌缩”，并给出处理建议 | `mflow/train/run.py` 的 `train_committee`；`step_train` | arXiv:2605.03964、2508.09907 |
-| 3 | **分区、分阶段探索**：温度分区，每区单独收敛；新区 MD 先短后长 | `mflow/al/explore.py` 的 `md_grid` / `run_explorers`；`campaign.yaml` | DP-GEN |
-| 4 | **覆盖度和分布外检测**：QUESTS δH（可选依赖），再加上描述符最近邻距离 | `mflow/al/select.py` 的 `descriptors` | QUESTS |
-| 5 | **性质跨轮稳定门**：每轮对固定的性质集（密度、RDF、D、EOS、dimer、声子）做比较，判据用误差棒 | 复用 `mflow/analysis/report.py`、`mflow/validate.py` | arXiv:2601.16047 |
-| 6 | **新探索器**：PLUMED 增强采样（LAMMPS `fix plumed`）、升温淬火、ASE GA；不确定度偏置 MD 放最后 | `mflow/al/explore.py`、`mflow/lmp/inputs.py` | Perego & Bonati、UBMD |
+| 优先级 | 内容 | 改动位置 | 依据 | v0.3.0 |
+|---|---|---|---|---|
+| 1 | **收敛判据升级**：加入连续 N 轮、failed 比例、MD 稳定性门、DFT 预算 / 最大轮数硬停止（标记“未收敛”）；信任窗口增加 `adaptive-lower` 模式 | `mflow/al/commands.py` 的 `stop_criteria`；`mflow/al/select.py` 的 `trust_window`；`thresholds.yaml` 的 `al` 段 | dpgen2、DP-GEN、Fu 2023 | ✅ |
+| 2 | **委员会多样性**：每个成员用不同的 replay 子集；允许混合 foundation（检查 r_max）；分歧 < 真实误差的 0.3 倍（即 MFlow 的 sigma_ratio = RMS(误差)/RMS(σ) ≥ 3）时明确判为“塌缩”，并给出处理建议 | `mflow/train/run.py` 的 `train_committee`；`step_train` | arXiv:2605.03964、2508.09907 | ✅ `train.foundations`、逐成员 `member_set`（replay 子集手动设）、COLLAPSED；另加 `committee: 1` 单模型模式 |
+| 3 | **分区、分阶段探索**：温度分区，每区单独收敛；新区 MD 先短后长 | `mflow/al/explore.py` 的 `md_grid` / `run_explorers`；`campaign.yaml` | DP-GEN | ✅ 另加多驱动 MD |
+| 4 | **覆盖度和分布外检测**：QUESTS δH（可选依赖），再加上描述符最近邻距离 | `mflow/al/select.py` 的 `descriptors` | QUESTS | ✅ |
+| 5 | **性质跨轮稳定门**：每轮对固定的性质集（密度、RDF、D、EOS、dimer、声子）做比较，判据用误差棒 | 复用 `mflow/analysis/report.py`、`mflow/validate.py` | arXiv:2601.16047 | 部分：eos / dimer / phonon 探针；密度、RDF、D 的跨轮比较尚未做 |
+| 6 | **新探索器**：PLUMED 增强采样（LAMMPS `fix plumed`）、升温淬火、ASE GA；不确定度偏置 MD 放最后 | `mflow/al/explore.py`、`mflow/lmp/inputs.py` | Perego & Bonati、UBMD | ✅ PLUMED（`fix plumed`）、heatquench、ubmd；GA 改为随机结构搜索 rss |
 
 建议先做 1 和 2。理由：它们直接决定“什么时候该停”和“选帧信号是否可信”，改动面也小，可以在下一次微调 foundation 模型时马上用上。
 

@@ -919,7 +919,7 @@ R²     = corrcoef(ref, pred)² </code></pre>
 </section>
 
 <section id="al">
-  <h2><span class="num">16</span>主动学习与 TFlow（v0.2）</h2>
+  <h2><span class="num">16</span>主动学习与 TFlow（v0.2 / v0.3）</h2>
   <div class="tablewrap">
     <table>
       <thead><tr><th>决定</th><th>做法</th><th>原因</th></tr></thead>
@@ -930,6 +930,16 @@ R²     = corrcoef(ref, pred)² </code></pre>
         <tr><td>拒收</td><td>非 done、<span class="mono">error_job_*</span>、KPOINTS 被改、SCF 步数 ≥ NELM、结构改变、OUTCAR 读不了</td><td>TFlow 的修复会改结构或设置，static 任务也不检查 SCF</td></tr>
         <tr><td>数据集</td><td>每轮从 initial + 全部已标注轮次重建；测试集固定</td><td>可复现；轮次之间可比</td></tr>
         <tr><td>"新帧误差"</td><td>本轮 DFT 刚算、模型没见过的帧上的委员会误差</td><td>唯一不偏乐观的精度估计</td></tr>
+        <tr><td>收敛分级（v0.3）</td><td>L0 adaptive-lower 窗口冻结；L1 每轮 / 每区（比例连续 2 轮、FPS 剩余、新帧误差、MD 稳定）；L2 探针与覆盖度；预算</td><td>只看候选比例会把"探索太窄"当成收敛；性质不稳说明数据仍在改变预测</td></tr>
+        <tr><td>n/a 不阻塞</td><td>没有数据的判据显示 n/a，不算通过也不算失败；v0.2 的三条核心判据例外（必须有数据）</td><td>没配 probes 的老活动不会因此永远"不收敛"</td></tr>
+        <tr><td>预算 ≠ 收敛</td><td><span class="mono">verdict</span> 分 converged / continue / budget_exhausted</td><td>预算用完时必须明确报告"未收敛"</td></tr>
+        <tr><td>adaptive-lower 冻结前</td><td>accurate 比例判据记为未满足</td><td>窗口还在动时比例是构造出来的</td></tr>
+        <tr><td>无委员会</td><td><span class="mono">committee: 1</span>；不确定度用描述子最近邻距离（阈值 = 训练集留一距离的 99 % 分位）或 QUESTS dH &gt; 0</td><td>同源微调的委员会会塌缩；描述子距离和 dH 不依赖成员差异</td></tr>
+        <tr><td>委员会塌缩</td><td>RMS(误差)/RMS(σ) ≥ 3 标 COLLAPSED（Spearman 好时降为 warn）</td><td>排序仍可用（重标定后），但不能只靠 σ 判断收敛</td></tr>
+        <tr><td>去驱动成员分歧</td><td>≥ 3 个成员时另算去掉成员 0 的 Fdev_max</td><td>成员 0 驱动 MD，它熟悉的区域被过采样</td></tr>
+        <tr><td>r_max 不同的成员</td><td>逐个计算器打分（慢，结果相同）</td><td>一个 MACECalculator 只接受相同 r_max</td></tr>
+        <tr><td>不确定度偏置 MD</td><td>E_b = ⟨E⟩ − κσ_E，力取解析梯度（有限差分验证）</td><td>Zaverkin 2024；能量 σ 对任意委员会都可微</td></tr>
+        <tr><td>分区</td><td>按顺序探索；通过 L1 的区默认不再探索；MD 步数 × grow<sup>k</sup></td><td>DP-GEN 的分阶段做法</td></tr>
       </tbody>
     </table>
   </div>
@@ -937,7 +947,7 @@ R²     = corrcoef(ref, pred)² </code></pre>
 
 
 <footer>
-  MFlow v0.2.0a1 · docs/conventions.html · MengnanCui/MFlow
+  MFlow v0.3.0 · docs/conventions.html · MengnanCui/MFlow
 </footer>
 
 </div>

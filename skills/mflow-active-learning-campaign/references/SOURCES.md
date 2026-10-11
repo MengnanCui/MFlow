@@ -16,9 +16,18 @@ MFlow's own (thresholds.yaml, tested in this repository) are not listed.
 
 ## Literature and documentation
 
-- Zeng et al., *Deep Potentials for Materials Science*, arXiv:2203.00393 — practical guide, Table I (trust windows, accurate-ratio rule, ~100 labels/iteration)
+- Wen et al., *Deep Potentials for Materials Science*, Mater. Futures 1, 022601 (2022), arXiv:2203.00393 — practical guide, Table I (trust windows, accurate-ratio rule, ~100 labels/iteration)
 - Kulichenko et al., *Chem. Rev.* 124, 13681 (2024) — data generation and active learning
 - Grasselli et al., *Digital Discovery* 4, 2654 (2025) — uncertainty, calibration, no formal stopping rule
+- dpgen2 documentation and source (`report_adaptive_lower`, `report_trust_levels_max`), docs.deepmodeling.com/projects/dpgen2,
+  read 2026-10-11 — adaptive-lower window (numb_candi 200, rate 0.01, level_f_hi 0.5, conv_tolerance 0.05, n_checked_steps 2)
+- Schwalbe-Koda et al., *Nat. Commun.* 16, 4014 (2025), arXiv:2404.12367; github.com/dskoda/quests (BSD-3) — dH > 0 as an
+  uncalibrated novelty test
+- Varga-Umbrich et al., arXiv:2605.03964; Beck et al., *J. Chem. Phys.* 163, 234103 (2025), arXiv:2508.09907 — committees
+  fine-tuned from one foundation model disagree too little (collapse)
+- Zaverkin et al., *npj Comput. Mater.* 10, 83 (2024), arXiv:2312.01416 — uncertainty-biased MD
+- Fu et al., arXiv:2210.07237 — stability, not force error, predicts simulation quality
+- MFlow's own survey with the full reference list: docs/research-al-2026-10.md
 
 ## Caveats
 
