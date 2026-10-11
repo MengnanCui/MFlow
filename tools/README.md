@@ -2,13 +2,13 @@
 
 体系专属的小工具，放不进通用的 `mflow` 包，但自己有用。
 
-每个脚本直接从上一级的 `mflow` 包里 import 读文件、日志、表格、配色和绘图风格
-（`sys.path` 会自己指到仓库根目录），所以**要和 `mflow/` 放在同一个仓库里跑**（或先 `pip install -e .`），
-不能单独拷一个文件走。这样换来的是每个工具只剩它自己那点逻辑。
+工具的代码在 `mflow/extras/`，装好 MFlow 之后用 **`mflow tool <名字>`** 调用；`mflow tool` 列出全部。
+这里的 `izo_formation.py` 只是给旧脚本留的转发入口（`python tools/izo_formation.py …` 仍然能用）。
+新加一个工具：在 `mflow/extras/` 放一个带 `main(argv)` 的模块，并在 `mflow/extras/__init__.py` 的 `TOOLS` 里登记一行。
 
 ---
 
-## `izo_formation.py` — In–Zn–O 形成能 vs In 比例
+## `mflow tool izo-formation` — In–Zn–O 形成能 vs In 比例
 
 读一个已经用 MACE 算完能量的 xyz，按 In 比例分组画形成能。
 
@@ -22,13 +22,13 @@ x 一律**从成分数出来**，不依赖任何命名或标签。
 
 ```bash
 # 参考能量直接给 xyz —— 工具自己数化学式单位，省掉人为除法
-python tools/izo_formation.py -in izo_mace.xyz -eZnO zno_mace.xyz -eIn2O3 in2o3_mace.xyz
+mflow tool izo-formation -in izo_mace.xyz -eZnO zno_mace.xyz -eIn2O3 in2o3_mace.xyz
 
 # 也可以直接给数字（eV / 化学式单位）
-python tools/izo_formation.py -in izo_mace.xyz -eZnO -8.12 -eIn2O3 -30.4
+mflow tool izo-formation -in izo_mace.xyz -eZnO -8.12 -eIn2O3 -30.4
 
 # 有氧空位 / 富氧时必须给 μ_O，否则报错停下
-python tools/izo_formation.py -in izo_mace.xyz -eZnO zno.xyz -eIn2O3 in2o3.xyz -muO -4.9 -xyz
+mflow tool izo-formation -in izo_mace.xyz -eZnO zno.xyz -eIn2O3 in2o3.xyz -muO -4.9 -xyz
 ```
 
 | 参数 | 说明 |

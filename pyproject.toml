@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mflow"
 version = "0.2.0a1"
-description = "MACE toolkit: evaluation, relaxation, training and LAMMPS molecular dynamics"
+description = "MACE potentials end to end: data checks, training, committees, active learning with TFlow, validation and LAMMPS MD"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -22,15 +22,22 @@ mace = ["mace-torch==0.3.16"]
 gpu = ["cuequivariance-torch", "nvidia-ml-py"]
 validate = ["phonopy>=2.20", "seekpath"]   # mflow validate phonon (phonopy BSD-3)
 test = ["pytest"]
+all = ["mace-torch==0.3.16", "cuequivariance-torch", "nvidia-ml-py", "phonopy>=2.20", "seekpath", "pytest"]
 
 [project.scripts]
 mflow = "mflow.cli:main"
 
-[tool.setuptools.packages.find]
-include = ["mflow*"]
+# Listed explicitly so the agent skills in ./skills ship inside the package as mflow/_skills
+# (tests/test_packaging.py fails if a new sub-package is missing here).
+[tool.setuptools]
+packages = ["mflow", "mflow.al", "mflow.analysis", "mflow.extras", "mflow.lmp", "mflow.train", "mflow._skills"]
+
+[tool.setuptools.package-dir]
+"mflow._skills" = "skills"
 
 [tool.setuptools.package-data]
 mflow = ["thresholds.yaml"]
+"mflow._skills" = ["*.md", "*/*.md", "*/references/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -35,20 +35,51 @@
 
 ## 安装
 
+装好之后，所有功能都是一个命令 **`mflow`**，在任何目录下都能用，不需要 `python xxx.py`。
+
+**第 0 步（只做一次）：装与 CUDA 匹配的 torch。** 这一步没法替你自动选，见 [pytorch.org](https://pytorch.org)，例如：
+
 ```bash
-# 1) 先装与 CUDA 匹配的 torch，再在仓库根目录：
-pip install -e ".[mace]"          # 得到命令 mflow（也可以 python -m mflow ...）
-pip install -e ".[gpu,test]"      # 可选：cuequivariance-torch、nvidia-ml-py（GPU 监控）、pytest
-pip install -e ".[validate]"      # 可选：phonopy + seekpath（mflow validate phonon）
-pytest                            # 55 个测试：装了 mace-torch 会真训练，PATH 里有 lmp 会真跑 LAMMPS（LJ / EAM）
+conda create -n mflow python=3.11 -y && conda activate mflow       # 建议单独一个环境
+pip install torch --index-url https://download.pytorch.org/whl/cu124
 ```
 
+**第 1 步：三选一。**
+
+```bash
+# A. 一键（推荐）：克隆后在仓库里执行。装 mflow + mace-torch 0.3.16 + phonopy，链接 skill，最后自检
+git clone https://github.com/MengnanCui/MFlow.git && cd MFlow
+bash install.sh                  # --all 再加 cuequivariance-torch、pytest；--completion 加 Tab 补全；--no-skills 不装 skill
+
+# B. 不克隆，直接装成命令（要更新时重跑同一行；装某个分支在 .git 后加 @分支名）
+pip install "mflow[mace,validate] @ git+https://github.com/MengnanCui/MFlow.git"
+
+# C. 开发模式：改了代码立刻生效
+pip install -e ".[all]"
+```
+
+**第 2 步：自检 + 记住你的默认设置。**
+
+```bash
+mflow doctor                                   # 缺什么、哪些命令受影响、怎么装，一次列清
+mflow config set model ~/models/my.model       # 以后 calc / relax / check / validate 不用每次写 -model
+mflow config set lmp ~/lammps/build/lmp        # 你自己编译的 LAMMPS（KOKKOS + ML-IAP）
+mflow skills install                           # 把 12 个 skill 链接到 ~/.agents/skills，pi 启动时自动加载
+eval "$(mflow completion bash)"                # Tab 补全（zsh 用 mflow completion zsh；写进 ~/.bashrc 就永久生效）
+mflow                                          # 不带参数：按用途分组列出所有命令
+```
+
+- 配置文件在 `~/.config/mflow/config.yaml`（`mflow config path`）；环境变量 `MFLOW_MODEL` / `MFLOW_LMP` 优先于它，命令行的 `-model` / `-lmp` 再优先。
+- 没设默认模型时用 MACE-MPA-0（`mpa`，第一次用时由 mace 自动下载）。
+- 缺可选依赖时，命令会直接告诉你装哪个包，不会只抛 traceback。
 - **LAMMPS** 需要另外从源码编译，打开 KOKKOS(CUDA)、ML-IAP、ML-SNAP、PYTHON、`MLIAP_ENABLE_PYTHON`，见 [3.1](#31-导出与环境检查)。
 - **`mace-torch` 固定为 0.3.16**：上游正在重写 v1.0，命令行参数会变。
+- 测试：`pytest`（64 个；装了 mace-torch 会真训练，找得到 `lmp` 会真跑 LAMMPS 的 LJ / EAM 算例）。
 
 ## 五分钟走完全程
 
 ```bash
+mflow doctor                                                                 # 0 环境就绪？
 mflow check -in dft.xyz -model mpa -split 0.1 -outdir check                  # 1 体检 + 零样本 + 切测试集
 mflow train -in check/dft_train.xyz -test check/dft_test.xyz -name cu -dry   # 2 先看 config.yaml
 mflow train -in check/dft_train.xyz -test check/dft_test.xyz -name cu        # 3 训练 + 实时监控 + 报告
@@ -70,6 +101,17 @@ mflow md -in start.xyz -deploy deploy -protocol equilibrate -temp 600 -steps 200
 - ✅ **已用真实 mace-torch 测过**（CPU 上的小模型，见 `tests/`）
 - 🧪 **流程已测，物理部分用替身**：MD 用 LAMMPS 的 LJ / Sutton–Chen EAM 代替 MACE；`validate` 用 ASE 的 EMT；主动学习用"假 TFlow"目录
 - ⚠️ **还没在 GPU + 真实 MACE/LAMMPS 上跑过**：第一次用请先跑 `mflow lmp-check`，把结果和小体系的手算对一下
+
+### 安装与设置
+
+| 你想… | 命令 | 你会得到 | 验证 |
+|---|---|---|---|
+| 看看有哪些命令 | `mflow` | 按用途分组的命令总览 | ✅ |
+| 检查机器缺什么 | `mflow doctor` | Python 包、GPU、默认模型、LAMMPS、skill、阈值逐项 pass/warn，附安装命令 | ✅ |
+| 不想每次都写 `-model` / `-lmp` | `mflow config set model …`、`mflow config set lmp …` | 写进 `~/.config/mflow/config.yaml` | ✅ |
+| 让 pi 用上 MFlow 的经验 | `mflow skills install` | 12 个 skill 链接到 `~/.agents/skills`（`-dest` 换位置、`-copy` 复制） | ✅ |
+| Tab 补全命令和参数 | `eval "$(mflow completion bash)"` | 子命令、选项补全，参数值处补全文件名 | ✅ |
+| 体系专属的小工具 | `mflow tool`、`mflow tool izo-formation …` | 例如 In–Zn–O 形成能随 In 比例 | ✅ |
 
 ### 数据与训练
 
@@ -513,7 +555,7 @@ mflow lmp-check -deploy deploy                                  # 换机器或�
 2. **LAMMPS 内嵌的 Python** 能否 import mace、torch、cuequivariance、cupy，torch 能否看到 GPU。
 3. 用导出的模型实际跑一次 2 原子的 `run 0`。
 
-`lmp` 可执行文件的查找顺序：`-lmp` > 环境变量 `MFLOW_LMP` > PATH。
+`lmp` 可执行文件的查找顺序：`-lmp` > 环境变量 `MFLOW_LMP` > `mflow config set lmp` > PATH。
 
 LAMMPS 编译选项（摘自 MACE 文档）：
 
@@ -697,7 +739,7 @@ mflow al import -name cu_al -tflow <calc_dir>
 ## 五、给 agent 用：skills
 
 [`skills/`](skills/) 里的 skill 遵循 [agentskills.io](https://agentskills.io/specification) 标准，pi 会自动加载。
-安装：`ln -s "$PWD/skills/"* ~/.agents/skills/`。
+安装：`mflow skills install`（默认链接到 `~/.agents/skills`；pi 也读 `~/.pi/agent/skills`，用 `-dest` 指定；`-copy` 复制而不是链接）。`mflow skills` 列出哪些已经装上。
 
 | skill | 用途 |
 |---|---|
@@ -754,9 +796,10 @@ agent 汇报时每个数字都应带出处（哪个 JSON 的哪个字段）；�
 | `train -committee N` | `<dir>/m0..m{N-1}/` · `committee.json` · `<name>_committee_report.json` · `committee_calibration.png` |
 | `validate` | `validate/<stem>_<kind>.json` · `.png` |
 | `al` | `<campaign>/campaign.yaml` · `state.json` · `ledger.jsonl` · `status.json` · `data/train_vNN.xyz` · `round_NN/{explore,select,export,train}/` |
-| 所有命令 | `py.log`：终端输出的无色副本 |
+| 计算类命令 | `py.log`：终端输出的无色副本（`doctor` / `config` / `skills` / `tool` / `completion` 不写） |
 
 **约定：**
+- 所有功能都从一个命令 `mflow` 进入；`mflow` 不带参数列出全部命令。
 - 参数一律用多字母（`-in`、`-model`……），避免冲突。
 - 终端彩色、日志无色，内容相同。
 - 不覆盖已有标签。
@@ -764,7 +807,7 @@ agent 汇报时每个数字都应带出处（哪个 JSON 的哪个字段）；�
 
 **其他文档：**
 - MFlow 替你做的所有决定和对应的风险点，记录在 [`docs/conventions.html`](docs/conventions.html)：E0 对齐、单位、训练默认值、LAMMPS 的单位 / 元素顺序 / 维里约定、一致性检查容差。
-- 针对特定体系的小工具放在 [`tools/`](tools/README.md)，例如 `izo_formation.py`（In–Zn–O 形成能）。
+- 针对特定体系的小工具：`mflow tool` 列出，例如 `mflow tool izo-formation`（In–Zn–O 形成能，说明见 [`tools/README.md`](tools/README.md)）。
 
 ---
 
@@ -773,7 +816,7 @@ agent 汇报时每个数字都应带出处（哪个 JSON 的哪个字段）；�
 | 版本 | 内容 |
 |---|---|
 | v0.1 | 包结构；`check` / `train` / `train-report`；`calc`（含委员会）/ `relax` / `plot`；`deploy` / `lmp-check` / `md` / `md-report`；3 个流程类 skill |
-| **v0.2.0a1（当前）** | a：`train -committee`（bagging）、不确定度校准、力误差按元素、`thresholds.yaml`；b：`mflow al` 主动学习闭环 + TFlow 对接；c：极小值跳跃探索；d：`validate`（dimer/eos/phonon/defect）、LAMMPS 协议库（恒温器/恒压器、equilibrate/transport/anneal/quench/minimize/melt）、`md-report` 统计（分块误差、平衡检验、扩散区、VDOS、Yeh–Hummer）；e：9 个经验类 skill。55 个测试。**尚未在 GPU + 真实 MACE/LAMMPS 上做端到端验证**（测试用 EMT / LJ / EAM 代替） |
+| **v0.2.0a1（当前）** | a：`train -committee`（bagging）、不确定度校准、力误差按元素、`thresholds.yaml`；b：`mflow al` 主动学习闭环 + TFlow 对接；c：极小值跳跃探索；d：`validate`（dimer/eos/phonon/defect）、LAMMPS 协议库（恒温器/恒压器、equilibrate/transport/anneal/quench/minimize/melt）、`md-report` 统计（分块误差、平衡检验、扩散区、VDOS、Yeh–Hummer）；e：9 个经验类 skill。打包：`mflow doctor` / `config` / `skills` / `tool` / `completion`、`install.sh`。64 个测试。**尚未在 GPU + 真实 MACE/LAMMPS 上做端到端验证**（测试用 EMT / LJ / EAM 代替） |
 | 以后 | 随机结构搜索探索、多头委员会（MACE PR #800 合并后）、不确定度偏置 MD、PLUMED 增强采样模板、集群提交，见路线图 |
 
 v0.1 之前是单文件脚本 `mflow.py`（内部版本 0.2–0.6，只有 calc/relax/plot），现已并入当前的包，计算结果逐位一致。
@@ -802,12 +845,23 @@ v0.1 之前是单文件脚本 `mflow.py`（内部版本 0.2–0.6，只有 calc/
 | `al explore / select / export / train` | `-name` | `-round` |
 | `al import` | `-name` + `-tflow DIR` 或 `-in FILE` | `-round` |
 | `al status` | `-name` | |
+| `doctor` | — | `-lmp PATH`（检查这个 LAMMPS 的编译）`-full` `-json FILE` |
+| `config` | — | `show` · `set <key> <value>` · `unset <key>` · `path`；key = `model` / `lmp` / `skills_dir` |
+| `skills` | — | `list` · `install [-dest DIR] [-copy] [-force]` · `path` |
+| `tool` | — | `mflow tool` 列出；`mflow tool izo-formation -in … -eZnO … -eIn2O3 …` |
+| `completion` | — | `bash` / `zsh` |
 
 单位：能量 eV（报告里 meV/atom）、力 eV/Å（报告里 meV/Å）、`-dt` / `-tdamp` / `-pdamp` 用 fs、`-press` 用 bar、温度 K、扩散 cm²/s、频率 THz。
 
 ---
 
 ## 九、常见问题
+
+**Q：一定要 `python xxx.py` 吗？**
+不用。安装后（见[安装](#安装)）所有功能都是 `mflow <命令>`，在任何目录都能用；`python -m mflow` 等价。旧的 `python tools/izo_formation.py` 仍然能用，但推荐 `mflow tool izo-formation`。
+
+**Q：每次都要写 `-model` 和 LAMMPS 路径吗？**
+不用。`mflow config set model …`、`mflow config set lmp …` 设一次即可；单次想换，命令行照样写 `-model`。
 
 **Q：MFlow 会帮我算 DFT 吗？**
 不会。DFT 由 TFlow 负责；MFlow 写出给 TFlow 的结构和单点脚本，再把结果读回来。也可以用任何带 `mflow_id` 和参考标签的 extxyz 导入。

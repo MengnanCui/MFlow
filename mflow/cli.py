@@ -92,8 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
     mace_args = argparse.ArgumentParser(add_help=False)
     mace_args.add_argument("-model", default=DEFAULT_MODEL, metavar="PATH|NAME",
                            help="path to a .model file, or a foundation name to download "
-                                "(small/medium/large/medium-mpa-0/medium-omat-0, aliases mpa/omat)\n"
-                                f"[{DEFAULT_MODEL}]")
+                                "(small/medium/large/medium-mpa-0/medium-omat-0, aliases mpa/omat); "
+                                f"default from `mflow config set model` [{DEFAULT_MODEL}]")
     mace_args.add_argument("-prefix", default="mpa0_", help="output label prefix [mpa0_]")
     mace_args.add_argument("-out", dest="output", default=None, metavar="FILE", help="output xyz")
     mace_args.add_argument("-device", default="auto", choices=["auto", "cpu", "cuda", "mps"], help="[auto]")
@@ -330,17 +330,110 @@ def build_parser() -> argparse.ArgumentParser:
     plot.add_argument("-pred", dest="pred_prefix", default="mpa0_", metavar="PREFIX",
                       help="prediction prefix [mpa0_]")
     plot.set_defaults(func=cmd_plot)
+
+    # -- set-up and convenience ------------------------------------------------------------- #
+    cfg = sub.add_parser("config", help="default model, LAMMPS path, skills dir (~/.config/mflow/config.yaml)")
+    cfg.add_argument("action", nargs="?", choices=["show", "set", "unset", "path"], default="show")
+    cfg.add_argument("key", nargs="?", help="model | lmp | skills_dir")
+    cfg.add_argument("value", nargs="?")
+    cfg.set_defaults(func=_lazy("mflow.config", "cmd_config"), log=None)
+
+    doc = sub.add_parser("doctor", help="check this machine: packages, GPU, default model, LAMMPS, skills")
+    doc.add_argument("-lmp", default=None, metavar="PATH", help="also inspect this LAMMPS build")
+    doc.add_argument("-full", action="store_true", help="inspect the LAMMPS build found on PATH / in config")
+    doc.add_argument("-json", default=None, metavar="FILE", help="write the report as json")
+    doc.set_defaults(func=_lazy("mflow.doctor", "cmd_doctor"), log=None)
+
+    sk = sub.add_parser("skills", help="list the agent skills, or install them for pi / other agents")
+    sk.add_argument("action", nargs="?", choices=["list", "install", "path"], default="list")
+    sk.add_argument("-dest", default=None, metavar="DIR", help="[~/.agents/skills or `mflow config set skills_dir`]")
+    sk.add_argument("-copy", action="store_true", help="copy instead of symlink (symlinks follow upgrades)")
+    sk.add_argument("-force", action="store_true", help="replace skills that are already there")
+    sk.set_defaults(func=_lazy("mflow.skills", "cmd_skills"), log=None)
+
+    tool = sub.add_parser("tool", help="system-specific tools (izo-formation, …); `mflow tool` lists them",
+                          add_help=False)
+    tool.add_argument("name", nargs="?")
+    tool.add_argument("rest", nargs=argparse.REMAINDER)
+    tool.set_defaults(func=_lazy("mflow.extras", "cmd_tool"), log=None)
+
+    comp = sub.add_parser("completion", help="print a shell completion script: eval \"$(mflow completion bash)\"")
+    comp.add_argument("shell", nargs="?", choices=["bash", "zsh"], default="bash")
+    comp.set_defaults(func=_lazy("mflow.completion", "cmd_completion"), log=None)
     return parser
 
 
+GROUPS = [
+    ("set up", [("doctor", "is this machine ready? what is missing?"),
+                ("config", "remember the default model and the LAMMPS path"),
+                ("skills", "install the agent skills for pi"),
+                ("completion", "tab completion for bash / zsh")]),
+    ("data & training", [("check", "health check of a DFT dataset (+ zero-shot, + test split)"),
+                         ("train", "fine-tune / train MACE, one model or a committee"),
+                         ("train-report", "learning curves, test errors, grade")]),
+    ("evaluation", [("calc", "predict, compare with DFT, committee uncertainty"),
+                    ("relax", "batch relaxation"),
+                    ("plot", "re-plot an evaluated file"),
+                    ("validate", "dimer / eos / phonon / defect")]),
+    ("LAMMPS MD", [("deploy", "export a model for LAMMPS (ML-IAP)"),
+                   ("lmp-check", "can this LAMMPS run it?"),
+                   ("md", "MD with gates; protocols: equilibrate transport anneal quench minimize melt"),
+                   ("md-report", "re-analyse a run")]),
+    ("active learning", [("al", "init / run / import / status … with TFlow for the DFT")]),
+    ("extras", [("tool", "system-specific tools, e.g. izo-formation")]),
+]
+
+
+def overview() -> int:
+    from .log import table
+    LOG(f"[hi]MFlow {__version__}[/hi] — MACE training, evaluation and LAMMPS MD")
+    rows = []
+    for group, cmds in GROUPS:
+        for i, (name, what) in enumerate(cmds):
+            rows.append((group if i == 0 else "", f"mflow {name}", what))
+    t = table("commands", ["", "command", "what for"], rows, styles=["dim", "key"])
+    for col in t.columns:
+        col.justify, col.no_wrap = "left", False
+    t.columns[0].min_width, t.columns[1].min_width = 15, 17
+    LOG(t)
+    LOG("details: [hi]mflow <command> -h[/hi] · first time here: [hi]mflow doctor[/hi] · docs: README.md")
+    return 0
+
+
+# a missing optional dependency -> what to install
+INSTALL_HINTS = {
+    "torch": "install the torch build matching your CUDA driver (pytorch.org), then: pip install mace-torch==0.3.16",
+    "mace": "pip install mace-torch==0.3.16",
+    "e3nn": "pip install mace-torch==0.3.16",
+    "cuequivariance_torch": "pip install cuequivariance-torch",
+    "phonopy": "pip install phonopy seekpath",
+    "seekpath": "pip install seekpath",
+}
+
+
 def main(argv=None) -> int:
+    import sys
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if not argv:
+        return overview()
     args = build_parser().parse_args(argv)
-    LOG.open(args.log)
+    if getattr(args, "log", None):
+        LOG.open(args.log)
     try:
         return args.func(args)
     except KeyboardInterrupt:
         LOG("[err]interrupted[/err]")
         return 130
+    except ModuleNotFoundError as exc:
+        root = (exc.name or "").split(".")[0]
+        if root not in INSTALL_HINTS:
+            raise
+        LOG(f"[err]`mflow {argv[0]}` needs the Python package '{root}', which is not installed.[/err]\n"
+            f"  {INSTALL_HINTS[root]}\n  then check with: mflow doctor")
+        return 2
+    except FileNotFoundError as exc:
+        LOG(f"[err]file not found:[/err] {exc.filename or exc}")
+        return 2
     except Exception:
         LOG.term.print_exception(show_locals=False)
         if LOG.file:

@@ -19,8 +19,9 @@ KOKKOS_ARGS = ["-sf", "kk", "-pk", "kokkos", "newton", "on", "neigh", "half"]
 
 
 def find_lmp(explicit: str | None = None) -> str | None:
-    """-lmp > $MFLOW_LMP > PATH (lmp, then the usual build names)."""
-    for cand in (explicit, os.environ.get("MFLOW_LMP")):
+    """-lmp > $MFLOW_LMP > `mflow config set lmp` > PATH (lmp, then the usual build names)."""
+    from ..config import get
+    for cand in (explicit, get("lmp")):
         if cand:
             path = shutil.which(cand) or (cand if Path(cand).exists() else None)
             if path:

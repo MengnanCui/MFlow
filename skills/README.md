@@ -4,8 +4,10 @@
 `~/.pi/agent/skills/`、`~/.agents/skills/`、项目里的 `.pi/skills/` 或 `.agents/skills/`。
 
 ```bash
-# 任选一种：链接到全局，或放进项目
-ln -s "$PWD/skills/"* ~/.agents/skills/
+mflow skills install                              # 链接到 ~/.agents/skills（随 MFlow 升级自动更新）
+mflow skills install -dest ~/.pi/agent/skills     # 或 pi 自己的目录
+mflow skills install -dest .agents/skills -copy   # 或只放进当前项目，复制一份固定下来
+mflow skills                                      # 看哪些已经装上
 ```
 
 **流程类**（怎么调用 mflow）：

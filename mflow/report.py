@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 
 from . import __version__
+from rich.markup import escape
+
 from .log import LOG, table
 
 RANK = {"pass": 0, "warn": 1, "fail": 2}
@@ -52,12 +54,12 @@ class Report:
     def show(self, title: str | None = None):
         if self.checks:
             t = table(title or f"checks  {self.command}", ["check", "status", "detail"],
-                      [(c["name"], f"[{STYLE[c['status']]}]{c['status']}[/]", c["message"])
+                      [(escape(c["name"]), f"[{STYLE[c['status']]}]{c['status']}[/]", escape(str(c["message"])))
                        for c in self.checks], styles=["key"])
             t.columns[2].justify, t.columns[2].no_wrap = "left", False
             LOG(t)
         for s in self.suggestions:
-            LOG(f"[warn]→[/warn] {s}")
+            LOG(f"[warn]→[/warn] {escape(s)}")
         LOG(f"verdict [{STYLE[self.status]}]{self.status.upper()}[/] · "
             f"{sum(c['status'] == 'pass' for c in self.checks)} pass · "
             f"{sum(c['status'] == 'warn' for c in self.checks)} warn · "

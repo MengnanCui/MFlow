@@ -10,7 +10,9 @@ import numpy as np
 
 from .log import LOG
 
-DEFAULT_MODEL = "/home/cmn01/software/mace-main032026/models/mace-mpa-0-medium.model"
+from .config import default_model
+
+DEFAULT_MODEL = default_model()   # mflow config set model …  > $MFLOW_MODEL > built-in (see config.py)
 MODEL_ALIASES = {"mp": "medium", "mp0": "medium", "mpa": "medium-mpa-0", "mpa0": "medium-mpa-0",
                  "omat": "medium-omat-0", "omat0": "medium-omat-0"}
 
@@ -21,7 +23,8 @@ def resolve_model(spec: str) -> tuple[str, str]:
     if os.path.isfile(path):
         return "file", path
     if "/" in path or path.endswith(".model"):
-        sys.exit(f"model file not found: {path}")
+        sys.exit(f"model file not found: {path}\n"
+                 f"  pass -model <file or foundation name>, or set a default: mflow config set model <file>")
     return "foundation", MODEL_ALIASES.get(spec.lower(), spec)
 
 

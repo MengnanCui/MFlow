@@ -4,7 +4,12 @@ MFlow — MACE toolkit: dataset checks, training, evaluation, LAMMPS molecular d
 
     mflow check / train / train-report          dataset health, mace_run_train + live monitoring, analysis
     mflow calc / relax / plot                   evaluation (incl. committees), ASE relaxation, re-plotting
-    mflow deploy / lmp-check / md / md-report   ML-IAP export, LAMMPS probe, KOKKOS MD, quality gates
+    mflow deploy / lmp-check / md / md-report   ML-IAP export, LAMMPS probe, KOKKOS MD + protocols, quality gates
+    mflow validate                              dimer / eos / phonon / defect
+    mflow al                                    active learning with TFlow for the DFT
+    mflow doctor / config / skills / tool / completion   set-up and convenience
+
+`mflow` with no arguments lists everything; `python -m mflow` is the same command.
 
 Every command writes a json report with status pass | warn | fail (see mflow.report).
 """
