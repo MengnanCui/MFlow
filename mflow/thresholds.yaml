@@ -19,6 +19,8 @@ train:                         # mflow train-report
 uq:                            # committee calibration
   spearman_pass: 0.5
   spearman_warn: 0.2
+  collapse_ratio: 3.0          # RMS(error) / RMS(sigma) at or above this: the committee has collapsed
+                               #   (spread < 1/3 of the real error; arXiv:2605.03964, 2508.09907)
 
 md:                            # mflow md-report gates
   nve_drift_pass_eV_atom_ps: 5.0e-4   # LAMBench tolerance
@@ -43,7 +45,7 @@ validate:                      # mflow validate
   dimer_tail_eV: 0.01          # |E(r_max)| — should vanish beyond the cutoff
   imaginary_THz: 0.1           # frequencies below -this count as imaginary (Γ acoustic noise is smaller)
 
-al:                            # active learning (v0.2)
+al:                            # active learning (v0.2; v0.3 convergence below)
   trust_lo_eV_A: 0.05          # DP-GEN example window; "auto" replaces lo with Q3 + 1.5 IQR of the
   trust_hi_eV_A: 0.15          #   committee deviation on the training set
   relative_floor_eV_A: 0.2     # sigma / (|F| + floor) for -trust relative
@@ -53,3 +55,25 @@ al:                            # active learning (v0.2)
   stop_candidate_fraction: 0.05
   stop_dft_energy_meV_atom: 10.0
   stop_dft_force_meV_A: 50.0
+  # -- v0.3 convergence (docs/research-al-2026-10.md §3). [lit] = published value, [sug] = suggested default
+  accurate_min: 0.99           # [lit] DP-GEN (Wen et al. 2022): stop labelling once > 99 % of frames are accurate
+  failed_max: 0.001            # [sug] fraction above hi
+  consecutive: 2               # [lit] dpgen2 n_checked_steps: a criterion must hold this many rounds in a row
+  selected_left_min: 10        # [sug] converged when FPS leaves fewer than max(this, frac × explored) frames
+  selected_left_frac: 0.001
+  fresh_vs_test: 1.5           # [sug] first-seen force RMSE / test RMSE of the model that explored
+  md_failed_max: 0.0           # [sug] fraction of exploration MD runs allowed to crash / blow up
+  ood_max: 0.01                # [sug] fraction of explored frames out of the training distribution
+  ood_quantile: 0.99           # [sug] descriptor OOD threshold = this quantile of the training set's own
+                               #   leave-one-out nearest-neighbour distances
+  adaptive_numb_candi: 200     # [lit] dpgen2 adaptive-lower: lo is set so max(numb, rate × N) frames are
+  adaptive_rate_candi: 0.01    #   candidates
+  adaptive_hi_eV_A: 0.5        # [lit] dpgen2 default level_f_hi
+  adaptive_conv_tol_eV_A: 0.05 # [lit] dpgen2 conv_tolerance: lo stable within this over `consecutive` rounds
+  adaptive_hi_offset_eV_A: 0.15  # [sug] once lo is frozen: hi = lo + offset
+  probe_tol:                   # [sug] property probes, change between rounds and spread between members
+    eos_V0_rel: 0.005
+    eos_B0_rel: 0.05
+    dimer_rmin_A: 0.02
+    dimer_Emin_eV: 0.02
+    phonon_max_THz: 0.2

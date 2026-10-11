@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mflow"
-version = "0.2.0a1"
+version = "0.3.0"
 description = "MACE potentials end to end: data checks, training, committees, active learning with TFlow, validation and LAMMPS MD"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,8 +21,10 @@ dependencies = [
 mace = ["mace-torch==0.3.16"]
 gpu = ["cuequivariance-torch", "nvidia-ml-py"]
 validate = ["phonopy>=2.20", "seekpath"]   # mflow validate phonon (phonopy BSD-3)
+al = ["quests"]                              # coverage / dH selection in mflow al (QUESTS BSD-3)
 test = ["pytest"]
-all = ["mace-torch==0.3.16", "cuequivariance-torch", "nvidia-ml-py", "phonopy>=2.20", "seekpath", "pytest"]
+all = ["mace-torch==0.3.16", "cuequivariance-torch", "nvidia-ml-py", "phonopy>=2.20", "seekpath", "quests",
+       "pytest"]
 
 [project.scripts]
 mflow = "mflow.cli:main"

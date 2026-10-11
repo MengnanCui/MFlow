@@ -19,6 +19,7 @@ from .. import __version__
 from ..log import LOG, num, table
 from ..report import Report
 from .campaign import Campaign
+from .convergence import current_region, evaluate, l1_passed, regions, stop_criteria  # noqa: F401
 
 ORDER = ["init", "explored", "selected", "exported", "labelled", "trained"]
 
@@ -42,7 +43,7 @@ def step_explore(camp, r, lmp=None):
     from .explore import run_explorers
     LOG.rule(f"round {r} · explore (model: {Path(camp.explorer_model()).name})")
     frames, counts = run_explorers(camp, r, lmp)
-    camp.log("explore", r, model=camp.explorer_model(), counts=counts, n=len(frames),
+    camp.log("explore", r, model=camp.explorer_model(), counts=counts, n=len(frames), region=counts.get("region"),
              settings=camp.settings["explore"])
     camp.save_state(round=r, stage="explored")
     return frames
@@ -148,30 +149,48 @@ def fresh_frame_error(camp, frames: list) -> dict | None:
 
 
 def step_train(camp, r, lmp=None) -> int:
-    from ..train.run import train_committee
-    LOG.rule(f"round {r} · train committee")
+    from ..train.run import train_committee, train_one
+    LOG.rule(f"round {r} · train")
     s, state = camp.settings, camp.state
     t = s["train"]
     test = camp.data / "test.xyz"
     out = camp.round_dir(r, "train")
+    n = max(1, int(t["committee"]))
     args = Namespace(input=state["dataset"], index=":", name=f"al_r{r:02d}", outdir=str(out), log=None,
                      test=str(test) if test.exists() else None, valid=None, ref_prefix="REF_", group=None,
                      mode=t["mode"], foundation=s["foundation"], head=None, pt=None, epochs=t["epochs"],
                      batch=t["batch"], dtype=t["dtype"], device=t["device"], cueq="auto", seed=123 + 10 * r,
                      set=list(t.get("set") or []), dry=False, resume=False, force=False, no_plot=True,
-                     committee=max(2, int(t["committee"])), bagging=t.get("bagging"))
-    code = train_committee(args)
-    cj = out / "committee.json"
-    models = json.loads(cj.read_text())["models"] if cj.exists() else []
-    report = out / f"al_r{r:02d}_committee_report.json"
-    cal = json.loads(report.read_text()).get("test", {}).get("calibration") if report.exists() else None
+                     committee=n, bagging=t.get("bagging"), foundations=t.get("foundations"),
+                     member_set=t.get("member_set"))
+    if n == 1:
+        LOG("[dim]committee: 1 — a single model; selection uses select.uncertainty (descriptor distance by "
+            "default) instead of a committee spread[/dim]")
+        code = train_one(args)
+        model = out / f"{args.name}.model"
+        models = [str(model)] if model.exists() else []
+        report = out / f"{args.name}_train_report.json"
+    else:
+        code = train_committee(args)
+        cj = out / "committee.json"
+        models = json.loads(cj.read_text())["models"] if cj.exists() else []
+        report = out / f"{args.name}_committee_report.json"
+    data = json.loads(report.read_text()) if report.exists() else {}
+    test_data = data.get("test") or (data.get("data") or {}).get("test") or {}
+    cal = test_data.get("calibration")
+    f_rmse = ((test_data.get("errors") or {}).get("forces") or {}).get("RMSE")
     camp.log("train", r, models=models, exit=code, dataset=state["dataset"],
              spearman=cal["spearman_atom"] if cal else None,
-             sigma_ratio=cal["sigma_ratio"] if cal else None, settings=t)
-    if cal and cal.get("verdict") == "fail":
+             sigma_ratio=cal["sigma_ratio"] if cal else None, collapsed=cal.get("collapsed") if cal else None,
+             test_force_RMSE=f_rmse, settings=t)
+    if cal and cal.get("collapsed"):
+        LOG(f"[warn]committee collapsed (RMS error / RMS σ = {cal['sigma_ratio']:.1f}): its spread is much smaller "
+            f"than the real error. Selection still works after recalibration if Spearman is good; otherwise use "
+            f"train.foundations (heterogeneous members) or select.uncertainty: descriptor[/warn]")
+    elif cal and cal.get("verdict") == "fail":
         LOG(f"[warn]{cal['verdict_message']}: selection by committee deviation is unreliable this round — "
             f"more members, larger bagging differences, or more epochs[/warn]")
-    if len(models) < args.committee:
+    if len(models) < n:
         return 2                              # a member did not train: that is a real failure
     camp.save_state(round=r, stage="trained", models=models)
     return 0
@@ -180,25 +199,6 @@ def step_train(camp, r, lmp=None) -> int:
 # ============================================================================ #
 #  status / stopping
 # ============================================================================ #
-
-def stop_criteria(camp) -> tuple[bool, list]:
-    s = camp.settings["stop"]
-    led = camp.ledger()
-    sel = [x for x in led if x["step"] == "select" and x.get("candidate_fraction") is not None]
-    imp = [x for x in led if x["step"] == "import" and x.get("fresh_frame_error")]
-    rows = []
-    frac = sel[-1]["candidate_fraction"] if sel else None
-    rows.append(("candidate fraction", frac is not None and frac < s["candidate_fraction"],
-                 f"{frac:.1%} (target < {s['candidate_fraction']:.0%})" if frac is not None else "no committee round yet"))
-    ff = imp[-1]["fresh_frame_error"] if imp else None
-    ok_e = ff is not None and ff["model"] == "committee" and ff["energy_RMSE"] < s["dft_energy_meV_atom"]
-    ok_f = ff is not None and ff["model"] == "committee" and ff["force_RMSE"] < s["dft_force_meV_A"]
-    rows.append(("fresh-frame energy", ok_e, f"{ff['energy_RMSE']:.1f} meV/atom (target < {s['dft_energy_meV_atom']})"
-                 if ff else "no labels imported yet"))
-    rows.append(("fresh-frame forces", ok_f, f"{ff['force_RMSE']:.0f} meV/Å (target < {s['dft_force_meV_A']})"
-                 if ff else "no labels imported yet"))
-    return all(ok for _, ok, _ in rows), rows
-
 
 def cmd_al_status(args) -> int:
     camp = load(args)
@@ -222,14 +222,23 @@ def cmd_al_status(args) -> int:
                          "fresh E", "fresh F", "Spearman"], rows, styles=["key"]))
     LOG("[dim]fresh E/F: error (meV/atom, meV/Å) of the exploring model on the frames DFT labelled that round — "
         "it never saw them, so this is the honest accuracy estimate[/dim]")
-    done, crit = stop_criteria(camp)
-    LOG(table("stopping criteria", ["criterion", "met", "value"],
-              [(n, "[ok]yes[/ok]" if ok else "[warn]no[/warn]", v) for n, ok, v in crit], styles=["key"]))
-    LOG(("[ok]all criteria met — run production MD and check the md-report gates before calling it done[/ok]"
-         if done else "[hi]continue[/hi]: next step is " + next_step(st)))
-    rep = Report("al-status", round=st.get("round"), stage=st.get("stage"))
-    for n, ok, v in crit:
-        rep.check(n, "pass" if ok else "warn", v)
+    ev = evaluate(camp)
+    mark = {True: "[ok]yes[/ok]", False: "[warn]no[/warn]", None: "[dim]n/a[/dim]"}
+    LOG(table("convergence", ["level", "criterion", "met", "value", "source"],
+              [(lvl, n, mark[ok], v, src) for lvl, n, ok, v, src in ev["rows"]], styles=["key", "key"]))
+    LOG("[dim]source: lit = published rule, sug = MFlow default (mflow/thresholds.yaml al), v0.2 = earlier rule, "
+        "user = your budget. n/a = no data yet: neither passes nor blocks.[/dim]")
+    if ev["verdict"] == "converged":
+        LOG("[ok]converged[/ok] — run production MD and check the md-report gates before calling it done")
+    elif ev["verdict"] == "budget_exhausted":
+        LOG("[err]budget exhausted — NOT converged[/err]: the rows marked no are what is still missing")
+    else:
+        LOG("[hi]continue[/hi]: next step is " + next_step(st))
+    rep = Report("al-status", round=st.get("round"), stage=st.get("stage"), verdict=ev["verdict"],
+                 region=ev["region"], regions=ev["regions"])
+    for lvl, n, ok, v, src in ev["rows"]:
+        rep.check(f"{lvl} {n}", "warn" if ok is False else "pass", v if ok is not None else f"n/a: {v}",
+                  value=ok)
     rep.data["ledger_rows"] = rows
     rep.write(camp.root / "status.json")
     return 0
@@ -275,6 +284,13 @@ def cmd_al_import(args) -> int:
     return 0 if not rep.failed else 2
 
 
+def cmd_al_probe(args) -> int:
+    from .probes import step_probe
+    camp = load(args)
+    out = step_probe(camp, current_round(camp, args))
+    return 0 if out else 2
+
+
 def cmd_al_train(args) -> int:
     camp = load(args)
     return step_train(camp, current_round(camp, args))
@@ -287,6 +303,12 @@ def cmd_al_run(args) -> int:
     for _ in range(8):                                  # at most one full cycle per call
         st = camp.state
         stage, r = st.get("stage", "init"), int(st.get("round", 0))
+        if stage in ("init", "trained", "labelled") and not args.force:
+            verdict = evaluate(camp)["verdict"]
+            if verdict == "budget_exhausted":
+                LOG("[err]budget exhausted (stop.max_rounds / stop.max_dft) — NOT converged[/err]: see "
+                    "`mflow al status` for what is missing; raise the budget in campaign.yaml or -force")
+                return 0
         if stage in ("init", "trained"):
             step_explore(camp, r, args.lmp)
         elif stage == "explored":
@@ -313,6 +335,9 @@ def cmd_al_run(args) -> int:
             if step_train(camp, r) != 0:
                 LOG("[err]training failed — fix it and rerun `mflow al train`[/err]")
                 return 2
+            if camp.settings.get("probes"):
+                from .probes import step_probe
+                step_probe(camp, r)
         else:
             LOG(f"[err]unknown stage {stage}[/err]")
             return 2

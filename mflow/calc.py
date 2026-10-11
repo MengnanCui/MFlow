@@ -103,35 +103,88 @@ def run_mace(frames: list, **kwargs) -> list:
         return evaluate_ase(frames, **kwargs)
 
 
+def committee_stats(energies, forces) -> dict:
+    """
+    Committee spread from per-member energies (M,) and forces (M, N, 3), DP-GEN's definitions:
+        Fdev          per atom   sqrt(mean_m |F_m - <F>|²)
+        Fdev_max      max over atoms — what active learning selects on
+        Fdev_max_wo0  the same without member 0 (>= 3 members): member 0 drives the exploration MD,
+                      so its own frames are biased towards where it is confident
+        Edev          std of the energy over members, meV/atom
+    """
+    E = np.asarray(energies, float)
+    F = np.asarray(forces, float)
+    dev = np.sqrt(((F - F.mean(0)) ** 2).sum(-1).mean(0))
+    out = {"E": float(E.mean()), "F": F.mean(0), "Fdev": dev, "Fstd": F.std(0), "Fdev_max": float(dev.max()),
+           "Edev": float(np.std(E) / F.shape[1] * 1000)}
+    if len(F) >= 3:
+        rest = F[1:]
+        out["Fdev_max_wo0"] = float(np.sqrt(((rest - rest.mean(0)) ** 2).sum(-1).mean(0)).max())
+    return out
+
+
+def _store(atoms, prefix: str, ekey: str, fkey: str, s: dict):
+    atoms.calc = None
+    atoms.info[ekey] = s["E"]
+    atoms.arrays[fkey] = s["F"]
+    atoms.arrays[f"{prefix}Fdev"] = s["Fdev"]
+    atoms.arrays[f"{prefix}Fstd"] = s["Fstd"]                                  # per component, for calibration
+    atoms.info[f"{prefix}Fdev_max"] = s["Fdev_max"]
+    atoms.info[f"{prefix}Edev"] = s["Edev"]
+    if "Fdev_max_wo0" in s:
+        atoms.info[f"{prefix}Fdev_max_wo0"] = s["Fdev_max_wo0"]
+
+
+def evaluate_calculators(frames: list, calcs: list, prefix: str, label: str = "committee") -> list:
+    """Committee of arbitrary ASE calculators, one after the other (members with different r_max, tests)."""
+    ekey, fkey = keys(prefix)
+    with Progress(*progress_columns("structures"), console=LOG.term, transient=True) as progress:
+        task = progress.add_task(f"{label} of {len(calcs)}", total=len(frames))
+        for atoms in frames:
+            Es, Fs = [], []
+            for c in calcs:
+                work = Atoms(numbers=atoms.numbers, positions=atoms.positions, cell=atoms.cell, pbc=atoms.pbc)
+                work.calc = c
+                Es.append(work.get_potential_energy())
+                Fs.append(work.get_forces())
+            _store(atoms, prefix, ekey, fkey, committee_stats(Es, Fs))
+            progress.advance(task)
+    return frames
+
+
 def evaluate_committee(frames: list, specs: list, device: str, dtype: str, prefix: str,
                        head: str | None) -> list:
     """
     Several models at once: the mean goes into <prefix>energy / <prefix>forces, the spread into
-        <prefix>Fdev      per atom, eV/Å   sqrt(mean_m |F_m - <F>|²)   (DP-GEN's model deviation)
-        <prefix>Fdev_max  per structure    max over atoms — what active learning selects on
-        <prefix>Edev      per structure    std of the energy over models, meV/atom
+    <prefix>Fdev / Fdev_max / Fdev_max_wo0 / Edev (see committee_stats). Members that cannot share
+    one MACECalculator (different r_max, e.g. mixed foundations) are evaluated one by one.
     """
     from mace.calculators import MACECalculator
 
     paths = [resolve_model(s)[1] for s in specs]
-    calc = MACECalculator(model_paths=paths, device=device, default_dtype=dtype, **({"head": head} if head else {}))
-    ekey, fkey = keys(prefix)
     t0 = time.perf_counter()
-    with Progress(*progress_columns("structures"), console=LOG.term, transient=True) as progress:
-        task = progress.add_task(f"committee of {len(paths)}", total=len(frames))
-        for atoms in frames:
-            work = Atoms(numbers=atoms.numbers, positions=atoms.positions, cell=atoms.cell, pbc=atoms.pbc)
-            work.calc = calc
-            atoms.calc = None
-            atoms.info[ekey] = float(work.get_potential_energy())
-            atoms.arrays[fkey] = work.get_forces()
-            comm = np.asarray(calc.results["forces_comm"])                     # (models, atoms, 3)
-            dev = np.sqrt(((comm - comm.mean(0)) ** 2).sum(-1).mean(0))
-            atoms.arrays[f"{prefix}Fdev"] = dev
-            atoms.arrays[f"{prefix}Fstd"] = comm.std(0)                         # per component, for calibration
-            atoms.info[f"{prefix}Fdev_max"] = float(dev.max())
-            atoms.info[f"{prefix}Edev"] = float(np.std(calc.results["energy_comm"]) / len(atoms) * 1000)
-            progress.advance(task)
+    try:
+        calc = MACECalculator(model_paths=paths, device=device, default_dtype=dtype, **({"head": head} if head else {}))
+    except Exception as exc:
+        if len(paths) < 2:
+            raise
+        LOG(f"[warn]the members cannot be loaded as one committee ({type(exc).__name__}: {exc}) — "
+            f"evaluating them one by one[/warn]")
+        calcs = [MACECalculator(model_paths=p, device=device, default_dtype=dtype, **({"head": head} if head else {}))
+                 for p in paths]
+        evaluate_calculators(frames, calcs, prefix)
+        calc = None
+    if calc is not None:
+        ekey, fkey = keys(prefix)
+        with Progress(*progress_columns("structures"), console=LOG.term, transient=True) as progress:
+            task = progress.add_task(f"committee of {len(paths)}", total=len(frames))
+            for atoms in frames:
+                work = Atoms(numbers=atoms.numbers, positions=atoms.positions, cell=atoms.cell, pbc=atoms.pbc)
+                work.calc = calc
+                work.get_potential_energy()
+                comm = np.asarray(calc.results["forces_comm"])                     # (models, atoms, 3)
+                _store(atoms, prefix, ekey, fkey, committee_stats(calc.results["energy_comm"], comm))
+                progress.advance(task)
     fdev = np.array([a.info[f"{prefix}Fdev_max"] for a in frames])
     LOG(f"[ok]done[/ok] {len(frames)} structures × {len(paths)} models in {elapsed(time.perf_counter() - t0)} · "
         f"Fdev_max median {np.median(fdev):.3f} / max {fdev.max():.3f} eV/Å")

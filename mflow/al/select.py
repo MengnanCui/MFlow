@@ -11,6 +11,12 @@ Selection — which explored structures are worth a DFT calculation.
                  auto      lo = Q3 + 1.5·IQR of Fdev_max on the current training set (MFlow's
                            heuristic, Tukey fence — not a DP-GEN feature); hi = max(3·lo, fixed hi)
                  relative  Fdev / (|F| + floor) per atom, max over atoms, with relative lo / hi
+                 adaptive-lower (v0.3, dpgen2) lo follows the explored deviations so that
+                           max(numb, rate × N) frames are candidates; once lo is stable for
+                           `consecutive` rounds it is frozen and hi = lo + offset
+   Without a committee (v0.3, select.uncertainty): descriptor = distance to the nearest training
+   frame above the training set's own leave-one-out quantile; quests = any atom with dH > 0;
+   none = every frame is a candidate, FPS only. See mflow/al/coverage.py.
    Recalibration (fixed windows): deviations are multiplied by RMS(error)/RMS(σ) from the
    committee's test-set calibration when that ratio is > 1 (variance scaling).
    Round 0 has no committee: every explored frame is a candidate and only diversity counts.
@@ -106,30 +112,130 @@ def recalibration(camp, round_: int) -> float:
     return 1.0
 
 
+def uncertainty_mode(camp, models: list) -> str:
+    want = camp.settings["select"].get("uncertainty", "auto")
+    if not models:
+        return "seed"                                   # round 0: diversity only
+    if want == "auto":
+        return "committee" if len(models) >= 2 else "descriptor"
+    if want == "committee" and len(models) < 2:
+        LOG("[warn]select.uncertainty committee needs ≥ 2 models — using descriptor distance[/warn]")
+        return "descriptor"
+    if want == "quests":
+        from .coverage import QUESTS_HINT, have_quests
+        if not have_quests():
+            LOG(f"[warn]select.uncertainty quests: QUESTS is not installed ({QUESTS_HINT}) — using descriptor "
+                f"distance[/warn]")
+            return "descriptor"
+    return want
+
+
+def adaptive_window(camp, score: np.ndarray) -> tuple[float, float, str]:
+    from ..thresholds import section
+    from .convergence import adaptive_lo, lo_is_stable, selects
+    th = section("al")
+    frozen = camp.state.get("trust_frozen_lo")
+    if frozen is not None:
+        return float(frozen), float(frozen) + th["adaptive_hi_offset_eV_A"], "adaptive-lower (frozen)"
+    hi = float(camp.settings["select"].get("hi_adaptive") or th["adaptive_hi_eV_A"])
+    lo = adaptive_lo(score, hi, th["adaptive_numb_candi"], th["adaptive_rate_candi"])
+    history = [x["trust_lo"] for x in selects(camp.ledger()) if x.get("trust_mode") == "adaptive-lower"] + [lo]
+    if lo_is_stable(history, th["adaptive_conv_tol_eV_A"], int(th["consecutive"])):
+        camp.save_state(trust_frozen_lo=lo)
+        LOG(f"[ok]adaptive-lower: lo stable within {th['adaptive_conv_tol_eV_A']} eV/Å over "
+            f"{th['consecutive']} rounds → frozen at {lo:.3f} eV/Å[/ok] (hi = lo + {th['adaptive_hi_offset_eV_A']})")
+    else:
+        LOG(f"[dim]adaptive-lower: lo {lo:.3f} eV/Å (history {', '.join(f'{x:.3f}' for x in history)})[/dim]")
+    return lo, hi, "adaptive-lower"
+
+
+def by_region(frames: list, accurate, candidate, failed) -> dict:
+    regs = {}
+    for i, a in enumerate(frames):
+        r = regs.setdefault(a.info.get("mflow_region", "all"), {"n": 0, "accurate": 0, "candidate": 0, "failed": 0})
+        r["n"] += 1
+        r["accurate"] += int(accurate[i])
+        r["candidate"] += int(candidate[i])
+        r["failed"] += int(failed[i])
+    return regs
+
+
 def run_selection(camp, round_: int, frames: list) -> tuple[list, dict]:
+    import json
+    from ..thresholds import section
+    from .convergence import current_region
     s = camp.settings
     sel = s["select"]
+    th = section("al")
     models = camp.committee()
     out_dir = camp.round_dir(round_, "select")
-    stats = {"n_explored": len(frames)}
+    region = current_region(camp)["name"]
+    stats = {"n_explored": len(frames), "region": region}
+    state = camp.state
+    train = ase.io.read(state["dataset"], ":") if state.get("dataset") and models else []
+    mode = uncertainty_mode(camp, models)
+    stats["uncertainty"] = mode
+    model = camp.explorer_model()
+    cache = {}
 
-    if models:
-        from ..thresholds import section
-        state = camp.state
-        train = ase.io.read(state["dataset"], ":") if state.get("dataset") else []
-        lo, hi, mode = trust_window(camp, models, train, sel)
-        floor = section("al")["relative_floor_eV_A"] if mode == "relative" else None
-        score = committee_scores(frames, models, floor)
-        scale = recalibration(camp, round_) if sel.get("recalibrate", True) and mode.startswith("fixed") else 1.0
+    def X_all():                                        # descriptors of every explored frame, computed once
+        if "X" not in cache:
+            cache["X"] = descriptors(frames, model)
+            ref = train[:: max(1, len(train) // 500)]
+            cache["X_train"] = descriptors(ref, model) if ref else None
+        return cache["X"], cache["X_train"]
+
+    coverage = {}
+    if mode == "committee":
+        lo, hi, tmode = trust_window(camp, models, train, sel) if sel.get("trust") != "adaptive-lower" else (0, 0, "")
+        floor = section("al")["relative_floor_eV_A"] if tmode == "relative" else None
+        work = [a.copy() for a in frames]
+        from ..calc import evaluate_committee
+        evaluate_committee(work, models, pick_device("auto"), "float64", "al_", None)
+        if floor is None:
+            score = np.array([a.info["al_Fdev_max"] for a in work])
+        else:
+            score = np.array([float(np.max(a.arrays["al_Fdev"] / (np.linalg.norm(a.arrays["al_forces"], axis=1)
+                                                                    + floor))) for a in work])
+        wo0 = [a.info.get("al_Fdev_max_wo0") for a in work]
+        if sel.get("trust") == "adaptive-lower":
+            lo, hi, tmode = adaptive_window(camp, score)
+        scale = recalibration(camp, round_) if sel.get("recalibrate", True) and tmode.startswith("fixed") else 1.0
         score = score * scale
         stats["recalibration"] = scale
+        if all(v is not None for v in wo0) and wo0:
+            stats["dev_median_wo_driver"] = float(np.median(np.asarray(wo0) * scale))
+        accurate, candidate, failed = score < lo, (score >= lo) & (score < hi), score >= hi
+        label = f"committee ({tmode}, lo {lo:.3g}, hi {hi:.3g})"
+    elif mode in ("descriptor", "quests"):
+        if mode == "descriptor":
+            from .coverage import descriptor_scores
+            X, X_train = X_all()
+            score, thr = descriptor_scores(X, X_train, th["ood_quantile"]) if X_train is not None else \
+                (np.zeros(len(frames)), 0.0)
+            tmode, lo = f"descriptor distance (q{th['ood_quantile']:.2f})", thr
+            coverage.update({"ood_fraction": float((score > thr).mean()) if len(score) else 0.0,
+                             "ood_threshold": thr})
+        else:
+            from .coverage import quests_scores
+            q = quests_scores(frames, train)
+            score, lo, tmode = q["dH_max"], 0.0, "QUESTS dH > 0"
+            coverage.update({k: v for k, v in q.items() if k != "dH_max"})
+        hi = float("inf")
+        accurate, candidate, failed = score <= lo, score > lo, np.zeros(len(score), bool)
+        stats["recalibration"] = 1.0
+        label = f"{tmode}, threshold {lo:.3g}"
+    else:
+        score = None
+
+    if score is not None:
         for a, v in zip(frames, score):
             a.info["mflow_dev"] = float(v)
-        accurate, candidate, failed = score < lo, (score >= lo) & (score < hi), score >= hi
-        stats.update({"trust_mode": mode, "trust_lo": lo, "trust_hi": hi,
+        stats.update({"trust_mode": tmode, "trust_lo": float(lo), "trust_hi": float(hi),
                       "n_accurate": int(accurate.sum()), "n_candidate": int(candidate.sum()),
                       "n_failed": int(failed.sum()), "candidate_fraction": float(candidate.mean()) if len(score) else 0.0,
-                      "dev_median": float(np.median(score)) if len(score) else None})
+                      "dev_median": float(np.median(score)) if len(score) else None,
+                      "regions": by_region(frames, accurate, candidate, failed)})
         pool = [f for f, c in zip(frames, candidate) if c]
         cap = int(sel["max_per_round"])
         if not pool and failed.mean() > 0.5:
@@ -138,22 +244,51 @@ def run_selection(camp, round_: int, frames: list) -> tuple[list, dict]:
                 f"frames instead (DP-GEN would skip them); check that MD did not explode.[/warn]")
             pool = [f for f, x in zip(frames, failed) if x]
             stats["pool"] = "failed (fallback: model not ready)"
-        LOG(table(f"round {round_} · committee classification ({mode}, lo {lo:.3g}, hi {hi:.3g})",
-                  ["", "frames", "fraction"],
+        LOG(table(f"round {round_} · {label}", ["", "frames", "fraction"],
                   [(name, f"{int(m.sum()):,}", f"{m.mean() * 100:.1f} %") for name, m in
                    (("accurate", accurate), ("candidate", candidate), ("failed", failed))],
                   styles=["key"]))
+    elif mode == "none":
+        pool = list(frames)
+        cap = int(sel["max_per_round"])
+        stats.update({"trust_mode": "none (FPS only)", "n_candidate": len(pool)})
     else:
         pool = list(frames)
         cap = int(s["seed"]["n_select"])
         stats.update({"trust_mode": "none (round 0: diversity only)", "n_candidate": len(pool)})
-        train = []
+
+    # coverage for the L2 criterion (cheap when the descriptors are needed anyway)
+    cov_mode = sel.get("coverage", "auto")
+    if models and cov_mode != "off" and not coverage:
+        from .coverage import QUESTS_HINT, descriptor_scores, have_quests, quests_scores
+        try:
+            if cov_mode == "quests" or (cov_mode == "auto" and have_quests()):
+                if have_quests():
+                    q = quests_scores(frames, train)
+                    coverage.update({k: v for k, v in q.items() if k != "dH_max"})
+                else:
+                    LOG(f"[warn]select.coverage quests: QUESTS not installed — {QUESTS_HINT}[/warn]")
+            if not coverage:
+                X, X_train = X_all()
+                if X_train is not None:
+                    d, thr = descriptor_scores(X, X_train, th["ood_quantile"])
+                    coverage.update({"ood_fraction": float((d > thr).mean()) if len(d) else 0.0, "ood_threshold": thr})
+        except Exception as exc:
+            LOG(f"[warn]coverage skipped: {type(exc).__name__}: {exc}[/warn]")
+    if coverage:
+        stats.update({k: coverage[k] for k in ("ood_fraction", "dH_pos_fraction") if k in coverage})
+        (out_dir / "coverage.json").write_text(json.dumps(coverage, indent=2), encoding="utf-8")
+        LOG("coverage: " + " · ".join(f"{k} {v:.3g}" for k, v in coverage.items() if isinstance(v, float)))
 
     picks = list(range(len(pool)))
     if len(pool) > cap and sel.get("dedupe", "fps") == "fps":
-        model = camp.explorer_model()
-        X = descriptors(pool, model)
-        X_ref = descriptors(train[:: max(1, len(train) // 500)], model) if train else None
+        if "X" in cache:
+            idx = {id(f): i for i, f in enumerate(frames)}
+            X, X_ref = cache["X"][[idx[id(f)] for f in pool]], cache["X_train"]
+        else:
+            X = descriptors(pool, model)
+            ref = train[:: max(1, len(train) // 500)]
+            X_ref = descriptors(ref, model) if ref else None
         mu, sd = X.mean(0), X.std(0) + 1e-12
         picks = fps((X - mu) / sd, cap, None if X_ref is None else (X_ref - mu) / sd)
     elif len(pool) > cap:

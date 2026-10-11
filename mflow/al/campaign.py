@@ -16,17 +16,32 @@ from ..log import LOG
 DEFAULTS = {
     "foundation": "mpa",          # explores round 0 and is the starting point of every fine-tune
     "train": {"mode": "finetune", "committee": 4, "bagging": None, "epochs": None, "batch": 8,
-              "dtype": "float32", "device": "auto", "set": []},
+              "dtype": "float32", "device": "auto", "set": [],
+              "foundations": None,    # v0.3: [mpa, omat] — member k fine-tunes foundations[k % n] (same r_max!)
+              "member_set": None},    # v0.3: [[key=value, ...], ...] extra -set per member, applied by index
     "seed": {"n_select": 100},    # round 0: diversity only (no committee yet)
     "explore": {
         "md": {"enabled": True, "engine": "ase", "temps": [300, 600, 900], "press": [1.0], "steps": 2000,
-               "dump": 20, "dt": 1.0, "deploy": None, "widen": 1.25},
+               "dump": 20, "dt": 1.0, "deploy": None, "widen": 1.25,
+               "regions": None,       # v0.3: [{name, temps, press, steps, grow, max_steps}, ...] explored in order
+               "keep_passed": False,  # v0.3: keep exploring regions that already passed
+               "drivers": 1},         # v0.3: 1 | N | all — committee members that each drive their own MD
         "perturb": {"enabled": True, "n": 20, "rattle": 0.05, "strain": 0.03, "vacancies": 0},
         "minhop": {"enabled": False, "steps": 20, "T0": 1000.0, "fmax": 0.05},
+        "heatquench": {"enabled": False, "T_high": 2000.0, "T_low": 300.0, "steps_hot": 1000,
+                       "steps_quench": 2000, "dump": 50, "dt": 1.0},
+        "rss": {"enabled": False, "n": 20, "vol_jitter": 0.2, "min_dist": 0.75, "fmax": 0.05, "steps": 200,
+                "every": 5},
+        "ubmd": {"enabled": False, "kappa": 0.5, "temps": [300.0], "steps": 2000, "dump": 20, "dt": 1.0},
+        "plumed": {"enabled": False, "file": None, "temps": [300.0], "steps": 10000, "dump": 50},
     },
     "select": {"trust": "fixed", "lo": None, "hi": None, "recalibrate": True, "dedupe": "fps",
-               "max_per_round": None},
-    "stop": {"candidate_fraction": None, "dft_energy_meV_atom": None, "dft_force_meV_A": None},
+               "max_per_round": None,
+               "uncertainty": "auto",  # v0.3: auto | committee | descriptor | quests | none
+               "coverage": "auto"},    # v0.3: auto | descriptor | quests | off — logged for the L2 criterion
+    "stop": {"candidate_fraction": None, "dft_energy_meV_atom": None, "dft_force_meV_A": None,
+             "max_rounds": None, "max_dft": None},
+    "probes": [],                 # v0.3: [{kind: eos|dimer|phonon, index: 0, ...}] run after every training
 }
 
 

@@ -29,6 +29,7 @@ PACKAGES = [
     ("cuequivariance_torch", "cuequivariance-torch", "deploy (ML-IAP export), fast training on GPU", False),
     ("phonopy", "phonopy", "validate phonon", False),
     ("seekpath", "seekpath", "phonon band paths", False),
+    ("quests", "quests", "al: coverage and dH selection (select.uncertainty / coverage quests)", False),
     ("pytest", "pytest", "running the test-suite", False),
 ]
 
@@ -104,8 +105,10 @@ def check_lammps(rep: Report, explicit: str | None, inspect: bool):
         rep.check("LAMMPS", "fail", f"{exe}: lmp -h failed ({exc})")
         return
     missing = env.missing_for_mliap(info)
+    plumed = " · PLUMED" if "PLUMED" in info["packages"] else " · no PLUMED (md -plumed, explore.plumed)"
     rep.check("LAMMPS", "warn" if missing else "pass",
-              f"{exe} · {info['version']}" + (f" · missing for MACE: {', '.join(missing)}" if missing else " · KOKKOS/ML-IAP/PYTHON"),
+              f"{exe} · {info['version']}" + (f" · missing for MACE: {', '.join(missing)}" if missing else
+                                              " · KOKKOS/ML-IAP/PYTHON") + plumed,
               suggest="this build can run classical potentials but not MACE: rebuild per README 3.1")
 
 

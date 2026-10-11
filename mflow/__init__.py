@@ -14,7 +14,7 @@ MFlow — MACE toolkit: dataset checks, training, evaluation, LAMMPS molecular d
 Every command writes a json report with status pass | warn | fail (see mflow.report).
 """
 
-__version__ = "0.2.0a1"
+__version__ = "0.3.0"
 
 # the names tools/ and older scripts import from `mflow`
 from .data import (REF_CANDIDATES, composition, energies, find_ref, fix_prefix, forces,  # noqa: E402,F401

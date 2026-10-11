@@ -52,7 +52,8 @@ AL_EXAMPLES = """examples
   #   ... label round_00/export/candidates.extxyz with TFlow (commands in round_00/export/README.txt) ...
   mflow al import -name cu_al -tflow /path/to/calc_dir
   mflow al run -name cu_al                    # train committee → explore → select → export (next round)
-  mflow al status -name cu_al                 # ledger + stopping criteria"""
+  mflow al status -name cu_al                 # ledger + convergence (L1 per round, L2 campaign, budget)
+  mflow al probe -name cu_al                  # property probes (campaign.yaml probes:) vs the last round"""
 
 
 def _lazy(module: str, name: str):
@@ -175,6 +176,9 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("-bagging", type=float, default=None, metavar="FRAC",
                        help="committee members train on different random subsets of this size "
                             "[0.8 for fine-tuning, 1.0 for scratch]")
+    train.add_argument("-foundations", default=None, metavar="A,B",
+                       help="committee only: member k fine-tunes foundation k %% n (e.g. mpa,omat) — the most "
+                            "effective way to keep fine-tuned members diverse; all need the same r_max")
     train.add_argument("-set", nargs="*", default=None, metavar="KEY=VALUE",
                        help="extra mace_run_train options, checked against mace_run_train --help")
     train.add_argument("-dry", action="store_true", help="write config.yaml only, do not train")
@@ -223,6 +227,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="iso: cubic / liquids; aniso: orthogonal, non-cubic; tri: full cell (triclinic) [iso]")
     md.add_argument("-melt_temp", type=float, default=None, help="melt: K for the molten half, above T_m and below boiling [1.5 × -temp]")
     md.add_argument("-fmax", type=float, default=0.01, help="minimize: eV/Å, max force component [0.01]")
+    md.add_argument("-plumed", default=None, metavar="FILE",
+                    help="add fix plumed with this PLUMED input (metadynamics, OPES, ...; needs PKG_PLUMED)")
     md.add_argument("-temp", type=float, default=300.0, help="K; start temperature for nve [300]")
     md.add_argument("-temp_end", type=float, default=None, help="K, linear ramp to this [= -temp]")
     md.add_argument("-press", type=float, default=1.0, help="bar, npt only [1]")
@@ -309,7 +315,9 @@ def build_parser() -> argparse.ArgumentParser:
     for name, fn, hlp in (("explore", "cmd_al_explore", "run the explorers of campaign.yaml"),
                           ("select", "cmd_al_select", "committee scoring + trust window + FPS"),
                           ("export", "cmd_al_export", "write candidates + TFlow run script"),
-                          ("train", "cmd_al_train", "train the committee on the current dataset")):
+                          ("train", "cmd_al_train", "train the committee on the current dataset"),
+                          ("probe", "cmd_al_probe", "property probes of campaign.yaml (eos/dimer/phonon) on "
+                                                    "every model, compared with the previous round")):
         sp = alsub.add_parser(name, parents=[al_name, al_round], help=hlp)
         if name == "explore":
             sp.add_argument("-lmp", default=None, metavar="PATH", help="lmp executable (engine lammps)")
@@ -323,7 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_st.set_defaults(func=_lazy("mflow.al.commands", "cmd_al_status"))
     p_run = alsub.add_parser("run", parents=[al_name], help="advance to the next DFT hand-off")
     p_run.add_argument("-lmp", default=None, metavar="PATH", help="lmp executable (engine lammps)")
-    p_run.add_argument("-force", action="store_true", help="keep going even if the stopping criteria are met")
+    p_run.add_argument("-force", action="store_true", help="keep going even if converged or out of budget")
     p_run.set_defaults(func=_lazy("mflow.al.commands", "cmd_al_run"))
 
     plot = sub.add_parser("plot", parents=[common, compare], help="re-analyse an evaluated file")

@@ -84,15 +84,26 @@ def calibration(delta_comp: np.ndarray, sigma_comp: np.ndarray, err_atom: np.nda
     }
 
 
+def collapsed(cal: dict) -> bool:
+    """The spread is far smaller than the real error: typical of members fine-tuned from one foundation."""
+    from .thresholds import section
+    ratio = cal.get("sigma_ratio")
+    return bool(ratio is not None and np.isfinite(ratio) and ratio >= section("uq")["collapse_ratio"])
+
+
 def verdict(cal: dict) -> tuple[str, str]:
     """pass/warn/fail for 'can this committee rank structures for active learning?'."""
     from .thresholds import section
     lim = section("uq")
     rho = cal["spearman_atom"]
+    cal["collapsed"] = collapsed(cal)
+    note = (f" · COLLAPSED: σ is {cal['sigma_ratio']:.1f}× smaller than the real error — add heterogeneous members "
+            f"(train.foundations, different data) or select with select.uncertainty: descriptor"
+            if cal["collapsed"] else "")
     if not np.isfinite(rho):
-        return "warn", "not enough data to judge"
+        return "warn", "not enough data to judge" + note
     if rho >= lim["spearman_pass"]:
-        return "pass", f"σ ranks errors well (Spearman {rho:.2f})"
+        return ("warn" if cal["collapsed"] else "pass"), f"σ ranks errors well (Spearman {rho:.2f})" + note
     if rho >= lim["spearman_warn"]:
-        return "warn", f"σ ranks errors weakly (Spearman {rho:.2f})"
-    return "fail", f"σ does not rank errors (Spearman {rho:.2f})"
+        return "warn", f"σ ranks errors weakly (Spearman {rho:.2f})" + note
+    return "fail", f"σ does not rank errors (Spearman {rho:.2f})" + note

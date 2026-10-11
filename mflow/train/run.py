@@ -300,14 +300,23 @@ def train_committee(args) -> int:
         LOG(f"[dim]bagging: each member trains on a different random {bag:.0%} of the training set "
             f"(fine-tuned members start from identical weights, so the seed alone gives a correlated committee)[/dim]")
     frames = read_dataset(args.input, args.index) if bag < 1.0 else None
-    members, codes = [], []
+    foundations = member_foundations(args)
+    member_set = list(getattr(args, "member_set", None) or [])
+    members, codes, plan = [], [], []
     for k in range(args.committee):
         sub = copy(args)
         sub.committee, sub.name, sub.seed = 1, f"{args.name}_m{k}", args.seed + k
         sub.outdir = str(base / f"m{k}")
+        sub.foundation = foundations[k % len(foundations)]
+        extra = [str(x) for x in (member_set[k] if k < len(member_set) and member_set[k] else [])]
+        sub.set = list(args.set or []) + extra
         if frames is not None:
             sub.input, sub.index = str(bagged(frames, bag, args.seed + k, base / f"m{k}_train.xyz")), ":"
-        LOG.rule(f"member {k + 1}/{args.committee} · seed {sub.seed}")
+        plan.append({"member": k, "seed": sub.seed, "foundation": None if args.mode == "scratch" else sub.foundation,
+                     "set": extra})
+        LOG.rule(f"member {k + 1}/{args.committee} · seed {sub.seed}"
+                 + (f" · foundation {sub.foundation}" if len(foundations) > 1 else "")
+                 + (f" · {' '.join(extra)}" if extra else ""))
         codes.append(train_one(sub))
         model = Path(sub.outdir) / f"{sub.name}.model"
         if model.exists():
@@ -319,8 +328,10 @@ def train_committee(args) -> int:
               suggest="a committee member failed to train: see its <member>/<name>_train_report.json")
     (base / "committee.json").write_text(json.dumps(
         {"models": members, "seeds": [args.seed + k for k in range(args.committee)], "bagging": bag,
-         "mode": args.mode,
+         "mode": args.mode, "members": plan,
          "foundation": None if args.mode == "scratch" else args.foundation}, indent=2), encoding="utf-8")
+    if len(set(foundations)) > 1 and len(members) >= 2:
+        check_same_rmax(members, rep)
     if len(members) >= 2 and args.test:
         rep.data["test"] = evaluate_committee_on(members, args.test, args, base, rep)
     elif not args.test:
@@ -330,6 +341,29 @@ def train_committee(args) -> int:
     rep.show()
     rep.write(base / f"{args.name}_committee_report.json")
     return 0 if not rep.failed else 2
+
+
+def member_foundations(args) -> list:
+    """train.foundations / -foundations: 'mpa,omat' or a list; default the single -foundation."""
+    f = getattr(args, "foundations", None)
+    if isinstance(f, str):
+        f = [x.strip() for x in f.split(",") if x.strip()]
+    return list(f) if f else [args.foundation]
+
+
+def check_same_rmax(models: list, rep: Report):
+    """Mixed foundations: one MACECalculator needs one r_max; otherwise members are evaluated one by one."""
+    import torch
+    rmax = {}
+    for m in models:
+        try:
+            rmax[m] = float(torch.load(m, map_location="cpu", weights_only=False).r_max)
+        except Exception:
+            return
+    vals = sorted(set(round(v, 4) for v in rmax.values()))
+    rep.check("members r_max", "pass" if len(vals) == 1 else "warn", f"r_max {', '.join(f'{v:g}' for v in vals)} Å",
+              suggest="members with different r_max cannot share one MACECalculator: committee scoring falls back to "
+                      "one model at a time (slower); LAMMPS deploy is unaffected")
 
 
 def bagged(frames: list, fraction: float, seed: int, path: Path) -> Path:

@@ -151,7 +151,7 @@ def follow(proc, log_file: Path, total_steps: int, start_step: int = 0, dt_fs: f
 def skiprun_input(p: MDParams) -> str:
     """The production input with its own log/dump and no restart files — -sr must leave no trace."""
     text = md_input(p, log_file="skiprun.log").replace("traj.lammpstrj", "skiprun.lammpstrj")
-    for name in ("phase_profile.dat", "relaxed.data", "relaxed.dump"):
+    for name in ("phase_profile.dat", "relaxed.data", "relaxed.dump", "plumed.log"):
         text = text.replace(name, "skiprun_" + name)
     # nothing is integrated under -sr, so the averaged volume does not exist: keep the box as it is
     skip = ("restart ", "write_restart", "change_box", "print ")
@@ -204,7 +204,8 @@ def cmd_md(args) -> int:
                  thermostat=getattr(args, "thermostat", "nh"), baro=getattr(args, "baro", "iso"),
                  protocol=getattr(args, "protocol", "single"), melt_temp=getattr(args, "melt_temp", None),
                  fmax=getattr(args, "fmax", 0.01), triclinic=not is_orthogonal(atoms),
-                 shell_cutoff=first_shell(atoms) if getattr(args, "protocol", "single") == "melt" else None)
+                 shell_cutoff=first_shell(atoms) if getattr(args, "protocol", "single") == "melt" else None,
+                 plumed=str(Path(args.plumed).resolve()) if getattr(args, "plumed", None) else None)
     kokkos = bool(deploy.get("kokkos", True))
     LOG.kv({"structure": f"{args.input} [{args.index}]", "atoms": len(atoms), "species (types)": " ".join(species),
             "protocol": p.protocol if p.protocol != "single" else "—",
@@ -257,6 +258,12 @@ def cmd_md(args) -> int:
               f"missing: {', '.join(missing)}" if missing else f"{info['version']} · {info['kokkos'] or 'no KOKKOS'}",
               suggest="this LAMMPS cannot run MACE through ML-IAP: rebuild with KOKKOS (CUDA), ML-IAP, "
                       "ML-SNAP, PYTHON and MLIAP_ENABLE_PYTHON (see `mflow lmp-check`)")
+    if p.plumed:
+        has = "PLUMED" in info["packages"]
+        rep.check("PLUMED", "pass" if has and Path(p.plumed).is_file() else "fail",
+                  p.plumed if has else "this lmp has no PLUMED package",
+                  suggest="fix plumed needs LAMMPS built with -D PKG_PLUMED=yes (DOWNLOAD_PLUMED=yes) and an "
+                          "existing PLUMED input file")
     if args.dry or (rep.failed and not args.force):
         if args.dry:
             LOG("[ok]dry run[/ok] — inputs written, LAMMPS not started")

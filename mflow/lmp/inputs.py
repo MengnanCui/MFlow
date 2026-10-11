@@ -54,6 +54,7 @@ class MDParams:
     fmax: float = 0.01               # minimize: max force component, eV/Å
     shell_cutoff: float | None = None  # melt: first-shell radius for the solid-bond order parameter, Å
     triclinic: bool = False          # the data file has tilt factors
+    plumed: str | None = None        # PLUMED input file: fix plumed (needs the PLUMED package)
 
     def __post_init__(self):
         if self.ensemble not in ENSEMBLES:
@@ -329,6 +330,8 @@ def md_input(p: MDParams, data_file: str = "data.lmp", resume_from: str | None =
               f"dump            traj all custom {p.dump} traj.lammpstrj id type element xu yu zu vx vy vz fx fy fz",
               f"dump_modify     traj element {' '.join(p.species)} sort id" + (" append yes" if resume_from else ""),
               f"restart         {p.restart} restart.a restart.b"]
+    if p.plumed:
+        lines += [f"fix             mflow_plumed all plumed plumedfile {p.plumed} outfile plumed.log"]
     for st in plan:
         if resume_step is not None and st.end <= resume_step:
             continue
