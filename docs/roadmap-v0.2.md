@@ -233,3 +233,7 @@ stop:
 | melt 协议 | 实现时改了两处 | 熔化半盒在**固定体积**下进行（只让液相做 NPT 会让盒子失控膨胀）；相判断用 ten Wolde 固相键数（原始 q6 分不清高温晶体和液体），用 Sutton–Chen Cu 的共存测试核对过 |
 
 **建议 TFlow 侧补充（未改动 TFlow）：** `vaspctl export-mlip`（直接写带 `REF_*` 的 extxyz）；static 任务记录 SCF 是否收敛；为 MLIP 标注提供"禁止改结构的 error fix"开关。
+
+---
+
+下一阶段（主动学习微调 foundation 模型）的方法调研见 [research-al-2026-10.md](research-al-2026-10.md)：探索方法、委员会/UQ、收敛判据、可复用项目，以及 v0.3 建议路线。
