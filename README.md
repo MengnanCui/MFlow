@@ -10,19 +10,26 @@
 
 数据生成（DFT 计算）不在本项目范围内，由 TFlow 负责。MFlow 的起点是一个**已经带 DFT 标签的 xyz 文件**。
 
+**第一次来：** 先看 [A. 我能帮你做什么](#a-我能帮你做什么功能总览) 找到你的目标，再照 [B. 场景配方](#b-按目标走10-个常见场景) 走；各章是细节，[第八章](#八命令速查)是命令速查。
+
 ---
 
 ## 目录
 
 - [安装](#安装)
 - [五分钟走完全程](#五分钟走完全程)
-- [一、训练](#一训练)：数据与标签 · 体检 · 选方案 · 训练与监控 · **精度怎么看** · 评估方案
+- [**A. 我能帮你做什么（功能总览）**](#a-我能帮你做什么功能总览)
+- [**B. 按目标走：10 个常见场景**](#b-按目标走10-个常见场景)
+- [一、训练](#一训练)：数据与标签 · 体检 · 选方案 · 训练与监控 · **精度怎么看** · 评估方案 · 静态性质 `validate`
 - [二、推理](#二推理)：标签 · 精度 · 不确定度（委员会）· 弛豫
 - [三、LAMMPS 动力学](#三lammps-动力学)：导出 · 环境检查 · **输入如何生成** · **系综怎么选** · 质量闸门 · 可参考的 skill
 - [四、主动学习：`mflow al`](#四主动学习mflow-al)：探索 → 筛选 → TFlow 标注 → 收回 → 委员会再训练 → 何时停
-- [五、给 agent 用：skills](#五给-agent-用skills)
+- [五、给 agent 用：skills](#五给-agent-用skills)：12 个 skill · 跟 agent 怎么说
 - [六、输出文件与约定](#六输出文件与约定)
 - [七、版本](#七版本)
+- [八、命令速查](#八命令速查)
+- [九、常见问题](#九常见问题)
+- [十、能力边界与已知限制](#十能力边界与已知限制)
 
 ---
 
@@ -46,12 +53,193 @@ mflow check -in dft.xyz -model mpa -split 0.1 -outdir check                  # 1
 mflow train -in check/dft_train.xyz -test check/dft_test.xyz -name cu -dry   # 2 先看 config.yaml
 mflow train -in check/dft_train.xyz -test check/dft_test.xyz -name cu        # 3 训练 + 实时监控 + 报告
 mflow calc  -in new_dft.xyz -model cu/cu.model -e0 none -group config_type   # 4 在新数据上评估
-mflow deploy -model cu/cu.model -outdir deploy                               # 5 导出给 LAMMPS（在 GPU 上）
-mflow lmp-check -deploy deploy                                               # 6 LAMMPS 能不能跑它
-mflow md -in start.xyz -deploy deploy -ensemble npt -temp 600 -steps 200000 -outdir md600   # 7 MD + 闸门
+mflow validate dimer -model cu/cu.model -elements Cu                         # 5 短程排斥墙是否完整
+mflow deploy -model cu/cu.model -outdir deploy                               # 6 导出给 LAMMPS（在 GPU 上）
+mflow lmp-check -deploy deploy                                               # 7 LAMMPS 能不能跑它
+mflow md -in start.xyz -deploy deploy -protocol equilibrate -temp 600 -steps 200000 -outdir md600   # 8 MD + 闸门
 ```
 
 每一步结束都会打印 `verdict PASS / WARN / FAIL`。**出现 FAIL 就先看建议，不要往下走。**
+
+---
+
+## A. 我能帮你做什么（功能总览）
+
+按"你想做的事"列出。最后一列是**目前验证到什么程度**，请据此决定用到多正式的场合：
+
+- ✅ **已用真实 mace-torch 测过**（CPU 上的小模型，见 `tests/`）
+- 🧪 **流程已测，物理部分用替身**：MD 用 LAMMPS 的 LJ / Sutton–Chen EAM 代替 MACE；`validate` 用 ASE 的 EMT；主动学习用"假 TFlow"目录
+- ⚠️ **还没在 GPU + 真实 MACE/LAMMPS 上跑过**：第一次用请先跑 `mflow lmp-check`，把结果和小体系的手算对一下
+
+### 数据与训练
+
+| 你想… | 命令 | 你会得到 | 验证 |
+|---|---|---|---|
+| 检查一批 DFT 数据能不能拿来训练 | `mflow check -in dft.xyz` | 每项 pass/warn/fail：标签缺失、NaN、力过大、原子过近、重复帧、能量离群、E0、分组规模；坏帧的索引 | ✅ |
+| 看基础模型（MPA-0 / OMAT / MH-1）在你的数据上准不准、DFT 设置对不对得上 | `mflow check -in dft.xyz -model mpa` | 零样本误差；原始能量偏移（> 0.4 eV/atom 说明 DFT 设置与基础模型不一致） | ✅ |
+| 切出测试集 | `mflow check -in dft.xyz -split 0.1` | 按 `config_type` 分层的 `*_train.xyz` / `*_test.xyz` | ✅ |
+| 微调 / 多头回放 / LoRA / 从头训练 | `mflow train -in train.xyz -test test.xyz -name run -mode finetune` | MACE 官方推荐超参的 `config.yaml`；实时进度条（误差、GPU/显存）；NaN 立即停；训练报告 | ✅ |
+| 先看配置再决定 | `mflow train … -dry` | 只写 `config.yaml` | ✅ |
+| 改某个超参 | `mflow train … -set lr=5e-4 patience=100` | 键名按 `mace_run_train --help` 校验，写错直接 fail | ✅ |
+| 训练中断了 | `mflow train … -resume` | 从最新 checkpoint 续 | ✅ |
+| 一次训练一组委员会（要不确定度） | `mflow train … -committee 4` | 4 个成员（不同 seed + 每人 80 % 数据）、测试集上的误差和**校准报告** | ✅ |
+| 判断训练好不好 | `mflow train-report -dir run` | 学习曲线、过拟合判断、测试集误差（按组、按元素、最差 5 个结构）、分级 | ✅ |
+
+### 评估、推理与不确定度
+
+| 你想… | 命令 | 你会得到 | 验证 |
+|---|---|---|---|
+| 用模型预测一批结构 | `mflow calc -in x.xyz -model run/run.model` | 能量、力写回 xyz（不覆盖已有标签） | ✅ |
+| 和 DFT 比误差 | `mflow calc … -ref dft_ -e0 none -group config_type` | MAE/RMSE/max/R²，按组、**按元素**、按力大小分档；parity 图 | ✅ |
+| 知道模型对哪些结构"拿不准" | `mflow calc -in md.xyz -model a.model,b.model,c.model` | 每个原子的力偏差、每个结构的 `Fdev_max` | ✅ |
+| 判断委员会的不确定度可不可信 | 同上，数据带 DFT 标签 | Spearman ρ、miscalibration area、RMS(误差)/RMS(σ)、校准图 | ✅ |
+| 批量弛豫 | `mflow relax -in x.xyz -nproc 3` | 多进程、可续跑，未收敛的单独标出 | ✅ |
+| 只重画图 | `mflow plot -in x_mace.xyz` | 不重算 | ✅ |
+
+### 静态性质（MD 之前先过这一关）
+
+| 你想… | 命令 | 你会得到 | 验证 |
+|---|---|---|---|
+| 查短程排斥墙有没有"洞"（MD 塌缩的头号原因） | `mflow validate dimer -model m -elements Cu,O` | 每个元素对的 E(r)/F(r)，MLIP Arena 的指标；墙坏了判 fail | 🧪 |
+| 晶格常数、体模量 | `mflow validate eos -model m -in relaxed.xyz -ref "V0=..,B0=.."` | V₀、B₀、B′，与 DFT 的相对误差 | 🧪 |
+| 声子有没有虚频 | `mflow validate phonon -model m -in relaxed.xyz` | 色散 + DOS 图、最低频率、虚频 q 点数（需要 phonopy） | 🧪 |
+| 空位形成能、表面能 | `mflow validate defect -model m -in conv.xyz -surface 111,100` | E_f（单质）、γ（J/m²） | 🧪 |
+
+### LAMMPS 动力学（MACE 经 ML-IAP + KOKKOS 在 GPU 上）
+
+| 你想… | 命令 | 你会得到 | 验证 |
+|---|---|---|---|
+| 把模型交给 LAMMPS | `mflow deploy -model m` | `deploy.json`（元素顺序、head、精度、hash） | ⚠️ |
+| 确认 LAMMPS 编译对了、依赖齐了 | `mflow lmp-check -deploy deploy` | 包、内嵌 Python 依赖、2 原子实跑，逐项 pass/fail | ⚠️ |
+| 跑 NVT / NPT / NVE | `mflow md -in s.xyz -deploy deploy -ensemble npt -temp 600` | 输入自动生成 → 语法检查 → **LAMMPS 与模型逐原子力对比** → 运行 → 质量闸门 | 🧪 |
+| 先平衡再取样 | `-protocol equilibrate` | NPT → 平均体积 → NVT | 🧪 |
+| 算扩散系数 / VDOS | `-protocol transport` | 生产段 NVE；D（含 x/y/z）、扩散区判断、VDOS、可选 Yeh–Hummer 修正 | 🧪 |
+| 退火、淬火做非晶 | `-protocol anneal` / `quench` | 变温速率 K/ps | 🧪 |
+| LAMMPS 里弛豫晶胞 | `-protocol minimize` | `relaxed.xyz`、最大力、压强 | 🧪 |
+| 算熔点 | `-protocol melt` | 固液共存的 T_m ± 误差、液相比例 | 🧪（Sutton–Chen Cu 上核对过物理） |
+| 换恒温器 / 恒压方式 | `-thermostat csvr`、`-baro aniso` | | 🧪 |
+| 中断后续跑 | `mflow md … -resume` | 按阶段续 | 🧪 |
+| 重新分析一条轨迹 | `mflow md-report -dir run -ref aimd.xyz` | 闸门、分块误差、平衡检验、RDF（含与 AIMD 对比）、MSD、VDOS | 🧪 |
+
+### 主动学习（DFT 由 TFlow 算）
+
+| 你想… | 命令 | 你会得到 | 验证 |
+|---|---|---|---|
+| 开一个活动 | `mflow al init -name camp -system start.xyz -data dft.xyz -test test.xyz` | `campaign.yaml`、台账 | 🧪 |
+| 自动走到"需要 DFT"为止 | `mflow al run -name camp` | 探索（MD / 微扰 / 极小值跳跃）→ 委员会筛选 → 导出给 TFlow 的文件和命令 | 🧪 |
+| 把 TFlow 的结果收回来 | `mflow al import -name camp -tflow <calc_dir>` | 合格的标注进数据集；不合格的（SCF 不收敛、错误修复改过结构……）列出原因 | 🧪 |
+| 看进度、要不要停 | `mflow al status -name camp` | 每轮的探索/候选/标注数、新帧误差、停止判据 | 🧪 |
+
+### 让 agent 帮你做
+
+| 你想… | 怎么做 | 验证 |
+|---|---|---|
+| 用 pi 之类的 agent 走全流程 | 安装 `skills/`（见第五章），直接说目标 | 格式测试 ✅；与 pi 的实际对话 ⚠️ |
+| 让 agent 帮你选方案、判断够不够用、排错 | 9 个经验类 skill | ⚠️ |
+| 留下可复查的记录 | `mflow-lab-notebook`：`NOTEBOOK.md` + `LESSONS.md` | — |
+| 按自己的体系改判定标准 | 写 `./mflow_thresholds.yaml`（只写要改的键），或设 `MFLOW_THRESHOLDS` | ✅ |
+
+---
+
+## B. 按目标走：10 个常见场景
+
+每个场景给出最短路径。出现 FAIL 先看报告里的建议；对应的经验类 skill 写在标题后面。
+
+### B1. 我有一批 DFT 数据，想得到一个能跑 MD 的势（`mflow-finetune-strategy`）
+
+```bash
+mflow check -in dft.xyz -model mpa -split 0.1 -outdir check            # 数据体检 + 零样本 + 切测试集
+mflow train -in check/dft_train.xyz -test check/dft_test.xyz -name cu -committee 4 -dry
+mflow train -in check/dft_train.xyz -test check/dft_test.xyz -name cu -committee 4
+mflow validate dimer -model cu/m0/cu_m0.model -elements Cu               # 短程墙
+mflow deploy -model cu/m0/cu_m0.model -outdir deploy && mflow lmp-check -deploy deploy
+mflow md -in start.xyz -deploy deploy -ensemble nve -temp 300 -steps 20000 -outdir nve_test   # 守恒性
+```
+
+判断：训练报告的分级 → dimer 无 fail → NVE 漂移通过。三关都过再进入生产。只要一个模型时去掉 `-committee 4`。
+
+### B2. 只想知道基础模型对我的体系准不准
+
+```bash
+mflow check -in dft.xyz -model mpa            # 或 omat / mh1（mh1 加 -head omat_pbe）
+mflow calc  -in dft.xyz -model mpa -group config_type
+```
+
+看 `energy (E0 aligned)` 和力的误差；原始偏移很大但对齐后很小，说明只是 DFT 参考零点不同，微调能轻松修正。
+
+### B3. MD 崩了（原子飞走、温度失控、原子重叠）（`mflow-failure-triage`）
+
+```bash
+mflow md -in start.xyz -deploy deploy -dt 0.5 -outdir md_dt05 ...         # 1 先减半步长（新目录）
+mflow validate dimer -model run.model -elements A,B                       # 2 查短程墙
+mflow calc -in md_dt05/traj.lammpstrj -index ::10 -model m0.model,m1.model,m2.model   # 3 委员会给崩之前的帧打分
+```
+
+偏差高 → 模型在外推 → 走 B4 补数据。偏差低还崩 → 查起始结构和导出（`lmp-check`）。
+
+### B4. 让模型覆盖它还不会的构型（高温、表面、缺陷）（`mflow-active-learning-campaign`）
+
+```bash
+mflow al init -name camp -system starts.xyz -data dft.xyz -test test.xyz -committee 4
+mflow al run -name camp                       # → round_00/export/：交给 TFlow
+mflow al import -name camp -tflow <calc_dir>
+mflow al run -name camp                       # 训练 → 探索 → 筛选 → 导出下一轮
+mflow al status -name camp                    # 每轮看一次
+```
+
+编辑 `camp/campaign.yaml` 调探索温度、是否开极小值跳跃、信任窗口、每轮数量。
+
+### B5. 算熔点（`mflow-property-protocols`）
+
+```bash
+# 正交晶胞，沿 z 拉长（Lz ≈ 2–4 Lx），几千原子
+mflow md -in slab_z.xyz -deploy deploy -protocol melt -temp 1300 -melt_temp 2000 -steps 200000 -outdir tm1300
+mflow md -in slab_z.xyz -deploy deploy -protocol melt -temp 1400 -melt_temp 2000 -steps 200000 -outdir tm1400
+```
+
+`melt: phases` pass 时 `T_melt_estimate` 就是结果；全熔了 → 降 `-temp`，全结晶 → 升 `-temp`。两个起点收敛到同一温度才算数。
+
+### B6. 算扩散系数和活化能
+
+```bash
+for T in 800 900 1000 1100; do
+  mflow md -in liq.xyz -deploy deploy -protocol transport -temp $T -steps 500000 -outdir D_$T
+done
+```
+
+每个温度看 `diffusive regime` 是否 pass、`diffusion_cm2_s` 的值；多个 seed（`-seed`）给误差。Arrhenius 拟合目前需要你（或 agent）把各目录的 `md_report.json` 汇总后自己拟合。
+
+### B7. 做非晶结构
+
+```bash
+mflow md -in liquid.xyz -deploy deploy -protocol equilibrate -temp 3000 -steps 20000 -outdir melt
+mflow md -in melt/traj.lammpstrj -deploy deploy -protocol quench -ensemble npt -temp 3000 -temp_end 300 -steps 300000 -outdir quench
+mflow md -in quench/traj.lammpstrj -deploy deploy -protocol minimize -outdir relaxed
+```
+
+报告给出淬火速率（K/ps）；至少比较两个速率。`-in` 可以直接给上一步的 `traj.lammpstrj`，默认取最后一帧（`-index`）。
+
+### B8. 晶格常数、体模量、声子、缺陷能
+
+```bash
+mflow md -in cu.xyz -deploy deploy -protocol minimize -baro aniso -outdir relax   # 或 mflow relax
+mflow validate eos    -model run.model -in relax/relaxed.xyz -ref "V0=11.8,B0=140"
+mflow validate phonon -model run.model -in relax/relaxed.xyz -supercell 4
+mflow validate defect -model run.model -in cu_conventional.xyz -surface 111,100
+```
+
+### B9. 判断这个势能不能用于发表 / 生产（`mflow-potential-acceptance`）
+
+四层逐一过：测试集误差（每个元素都看）→ `validate` → 目标条件下的 MD 闸门 → **从生产轨迹抽 20–50 帧让 TFlow 复算**（`al export/import` 可以直接复用）。没做的层在结论里写"未验证"。
+
+### B10. 批量弛豫几千个结构
+
+```bash
+mflow relax -in candidates.xyz -model run.model -nproc 3 -fmax 0.02
+mflow relax -in candidates.xyz -model run.model -nproc 3 -fmax 0.02 -resume   # 中断后
+```
+
+按输出里的 `<p>converged` 筛选，不要按 `<p>fmax`。
 
 ---
 
@@ -297,7 +485,7 @@ mflow relax -in data.xyz -resume                   # 接着上次中断的地方
 - **资源监控。** 进度条右侧实时显示整卡/整机的 GPU、CPU、内存占用。
   - GPU 利用率低于 30% 显示为红色，说明该加 worker；显存超过 90% 说明该减 worker。
   - 设 `MFLOW_NO_MONITOR=1` 可以关闭监控。
-- ⚠️ **单卡上跑不满。** ASE 这条路线无法占满一张 GPU；大批量的小结构以后会改用 torch-sim（v0.2）。
+- ⚠️ **单卡上跑不满。** ASE 这条路线无法占满一张 GPU；大批量的小结构以后可能改用 torch-sim（尚未实现）。
 
 ---
 
@@ -534,6 +722,22 @@ mflow al import -name cu_al -tflow <calc_dir>
 **分工：** 代码控制执行（顺序、校验、闸门）；skill 提供经验（选什么、够不够、下一步做什么）。
 经验类 skill 改写自公开 skill 集合与文献，出处固定到 commit，记在各自的 `references/SOURCES.md`。
 
+### 5.1 跟 agent 怎么说
+
+直接说**目标**，不用说命令。按 skill 的约定，agent 会先写计划给你看，在耗时的 GPU 步骤和任何 DFT 之前停下来等你确认。
+
+| 你说 | agent 会做什么 | 在哪里停下来问你 |
+|---|---|---|
+| "看看 `dft.xyz` 能不能拿来微调 MPA" | `check -model mpa -split 0.1`，读报告，告诉你坏帧和 DFT 设置是否匹配 | 有 fail 时 |
+| "用这些数据微调，要能跑 1000 K 的液体" | 选模式（多半是 multihead）、`train -dry` 给你看配置 | 开始训练前 |
+| "这个模型够不够算扩散系数？" | 按四层验证走：训练报告 → `validate dimer` → NVE → 目标温度 MD | 需要 DFT 复算时 |
+| "MD 在 1500 K 崩了" | 按排错表一次改一个变量：减半步长 → dimer → 委员会打分 | 结论指向"需要补数据"时 |
+| "帮我做一轮主动学习" | `al run`，汇报候选比例、选了多少帧、预计 DFT 量 | 交给 TFlow 之前（一定会停） |
+| "TFlow 算完了，在 /path/calc" | `al import`，汇报收下多少、拒收多少及原因、新帧误差 | 拒收比例 > 10 % 时 |
+| "算一下 Cu 的熔点" | 建拉长的盒子 → 估成本 → 两个起点跑 `melt` | 开跑前（几个 GPU 小时） |
+
+agent 汇报时每个数字都应带出处（哪个 JSON 的哪个字段）；没有出处的数字请追问。
+
 ---
 
 ## 六、输出文件与约定
@@ -573,3 +777,84 @@ mflow al import -name cu_al -tflow <calc_dir>
 | 以后 | 随机结构搜索探索、多头委员会（MACE PR #800 合并后）、不确定度偏置 MD、PLUMED 增强采样模板、集群提交，见路线图 |
 
 v0.1 之前是单文件脚本 `mflow.py`（内部版本 0.2–0.6，只有 calc/relax/plot），现已并入当前的包，计算结果逐位一致。
+
+---
+
+## 八、命令速查
+
+所有命令都有 `-log`（默认 `py.log`）和 `-h`。完整说明见各章。
+
+| 命令 | 必填 | 常用选项 |
+|---|---|---|
+| `check` | `-in` | `-model` `-head` `-test` `-split` `-seed` `-ref` `-group` `-outdir` |
+| `train` | `-in` `-name` | `-test` `-valid` `-mode finetune\|multihead\|lora\|scratch` `-foundation` `-head` `-pt` `-epochs` `-batch` `-committee` `-bagging` `-set k=v …` `-dry` `-resume` `-force` |
+| `train-report` | `-dir` | `-test` `-group` |
+| `calc` | `-in` | `-model a[,b,c]` `-head` `-ref` `-e0 fit\|mean\|none\|file.json` `-group` `-prefix` `-batch` `-dtype` |
+| `relax` | `-in` | `-model` `-fmax` `-steps` `-opt` `-cell full\|none` `-nproc` `-traj` `-resume` |
+| `plot` | `-in` | `-pred` `-ref` `-group` |
+| `validate` | `dimer\|eos\|phonon\|defect` | `-model` `-in` `-elements` `-ref "k=v,…"` `-strain` `-supercell` `-mesh` `-surface` `-min_width` `-outdir` |
+| `deploy` | `-model` | `-head` `-dtype float32\|float64` `-outdir` |
+| `lmp-check` | — | `-lmp` `-deploy` |
+| `md` | `-in` `-deploy` | `-protocol` `-ensemble` `-thermostat` `-baro` `-temp` `-temp_end` `-press` `-dt` `-steps` `-dump` `-melt_temp` `-fmax` `-seed` `-ngpu` `-outdir` `-dry` `-resume` |
+| `md-report` | `-dir` | `-skip` `-stride` `-ref aimd.xyz` `-viscosity` |
+| `al init` | `-name` `-system` | `-data` `-test` `-foundation` `-mode` `-committee` `-engine ase\|lammps` |
+| `al run` | `-name` | `-lmp` `-force` |
+| `al explore / select / export / train` | `-name` | `-round` |
+| `al import` | `-name` + `-tflow DIR` 或 `-in FILE` | `-round` |
+| `al status` | `-name` | |
+
+单位：能量 eV（报告里 meV/atom）、力 eV/Å（报告里 meV/Å）、`-dt` / `-tdamp` / `-pdamp` 用 fs、`-press` 用 bar、温度 K、扩散 cm²/s、频率 THz。
+
+---
+
+## 九、常见问题
+
+**Q：MFlow 会帮我算 DFT 吗？**
+不会。DFT 由 TFlow 负责；MFlow 写出给 TFlow 的结构和单点脚本，再把结果读回来。也可以用任何带 `mflow_id` 和参考标签的 extxyz 导入。
+
+**Q：没有 GPU 能用吗？**
+`check` / `calc` / `relax` / `train` / `validate` 在 CPU 上都能跑（慢）。`deploy` 和 LAMMPS 的 MACE 路线需要 GPU。
+
+**Q：没有 MACE 模型，想先试试命令？**
+`mflow validate … -model emt` 用 ASE 的 EMT；PATH 里有 `lmp` 时，`pytest` 会用 LJ / EAM 把 LAMMPS 流程完整跑一遍。
+
+**Q：我的 LAMMPS 是 conda 装的 CPU 版，能用吗？**
+MACE 的 ML-IAP 路线需要自己编译的 KOKKOS(CUDA) + ML-IAP + PYTHON 版本（见 3.1），`mflow lmp-check` 会告诉你缺什么。
+
+**Q：为什么一致性检查不让我跳过？**
+它失败只有几种原因：元素顺序错位、导出了错误的 head、导出环境与 LAMMPS 内嵌 Python 的版本不一致、单位或维里约定错误。每一种都会让整段 MD 静默出错。
+
+**Q：阈值太严 / 太松怎么办？**
+在工作目录写 `mflow_thresholds.yaml`，只写要改的键（键名见 `mflow/thresholds.yaml`），或用 `MFLOW_THRESHOLDS=/path/file.yaml`。改了什么、为什么，记进 `LESSONS.md`。
+
+**Q：多头模型（MH-1、多头微调后的模型）怎么用？**
+`calc` / `validate` / `deploy` 都加 `-head`。多头微调之后用你自己的 head（通常 `Default`），不要用 `pt_head`。
+
+**Q：结果放在哪？怎么给别人复查？**
+每个命令一个 JSON 报告（`status` + 逐项检查 + 建议 + 数据）和一张图；MD 目录里有完整的 LAMMPS 输入和 `md.json`，可以原样重跑。见第六章。
+
+**Q：mace-torch 能升级吗？**
+目前固定 0.3.16。上游 v1.0 会改命令行参数，升级后先跑 `pytest`。
+
+---
+
+## 十、能力边界与已知限制
+
+**不做的事：**
+- DFT 计算、输入生成和作业提交（TFlow 负责）；集群作业提交（MFlow 在本机直接跑）。
+- 在 LAMMPS 里实时计算 MACE 的不确定度（上游不支持；委员会打分在 MD 之后离线做）。
+
+**还没实现：**
+- 主动学习：随机结构搜索探索、QUESTS 信息熵去重与停止判据、不确定度偏置 MD、多头委员会。
+- 性质：弹性常数、Arrhenius 自动拟合、离子电导（Nernst–Einstein）、热导、增强采样（PLUMED）。
+- 大批量 GPU 弛豫（torch-sim）。
+
+**已知限制：**
+- ⚠️ **尚未在 GPU + 真实 MACE + 自编译 LAMMPS 上端到端跑过。** 第一次使用请从 `lmp-check` 开始，并先跑一条短 NVE 看漂移。
+- ML-IAP 多卡在部分 LAMMPS 版本上会崩，默认单卡；多分区、副本交换不支持。
+- `fix temp/csvr` 的 KOKKOS 版本要 LAMMPS ≥ 2Sep2026，旧版本在 CPU 上算这个 fix（正确但慢）。
+- `melt` 协议需要正交晶胞、界面垂直于 z。
+- `validate defect` 对化合物只给原始能量差（形成能需要化学势）。
+- `validate phonon` 需要 `pip install phonopy seekpath`。
+- 委员会成员都从同一个基础模型微调时，不确定度偏小；bagging 和测试集校准能缓解，但不能完全消除。
+
